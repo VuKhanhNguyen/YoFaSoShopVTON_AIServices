@@ -1,0 +1,10 @@
+-r requirements-api.txt
+httpx==0.28.1
+pytest==8.4.2
+pytest-cov==6.3.0
+openapi-spec-validator==0.7.2
+ruff==0.13.3
+# CPU-only regression cho primitive notebook, không tải PyTorch/model.
+opencv-python-headless==4.8.1.78
+scikit-learn==1.3.2
+

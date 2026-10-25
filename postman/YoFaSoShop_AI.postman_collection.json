@@ -1,0 +1,574 @@
+{
+  "info": {
+    "name": "YoFaSoShop AI v1",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "GET /health/live",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "X-Correlation-ID",
+            "value": "postman-demo"
+          }
+        ],
+        "url": "{{aiBaseUrl}}/health/live"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Không có lỗi server ngoài dự kiến', function () { pm.expect(pm.response.code).to.be.below(500); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "GET /health/ready",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "X-Correlation-ID",
+            "value": "postman-demo"
+          }
+        ],
+        "url": "{{aiBaseUrl}}/health/ready"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Không có lỗi server ngoài dự kiến', function () { pm.expect(pm.response.code).to.be.below(500); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "GET /internal/v1/config-check",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "X-Correlation-ID",
+            "value": "postman-demo"
+          },
+          {
+            "key": "X-Internal-API-Key",
+            "value": "{{aiApiKey}}"
+          }
+        ],
+        "url": "{{aiBaseUrl}}/internal/v1/config-check"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Không có lỗi server ngoài dự kiến', function () { pm.expect(pm.response.code).to.be.below(500); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "GET /internal/v1/capabilities",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "X-Correlation-ID",
+            "value": "postman-demo"
+          },
+          {
+            "key": "X-Internal-API-Key",
+            "value": "{{aiApiKey}}"
+          }
+        ],
+        "url": "{{aiBaseUrl}}/internal/v1/capabilities"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Không có lỗi server ngoài dự kiến', function () { pm.expect(pm.response.code).to.be.below(500); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "GET /internal/v1/models",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "X-Correlation-ID",
+            "value": "postman-demo"
+          },
+          {
+            "key": "X-Internal-API-Key",
+            "value": "{{aiApiKey}}"
+          }
+        ],
+        "url": "{{aiBaseUrl}}/internal/v1/models"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Không có lỗi server ngoài dự kiến', function () { pm.expect(pm.response.code).to.be.below(500); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "POST /internal/v1/assets",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "X-Correlation-ID",
+            "value": "postman-demo"
+          },
+          {
+            "key": "X-Internal-API-Key",
+            "value": "{{aiApiKey}}"
+          }
+        ],
+        "url": "{{aiBaseUrl}}/internal/v1/assets",
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "role",
+              "value": "garment",
+              "type": "text"
+            },
+            {
+              "key": "file",
+              "type": "file",
+              "src": ""
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Không có lỗi server ngoài dự kiến', function () { pm.expect(pm.response.code).to.be.below(500); });",
+              "if (pm.response.code === 201) { const a = pm.response.json(); pm.environment.set('assetId', a.assetId); if (a.role === 'person') pm.environment.set('personAssetId', a.assetId); if (a.role === 'garment') pm.environment.set('garmentAssetId', a.assetId); }"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "GET /internal/v1/assets/{asset_id}",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "X-Correlation-ID",
+            "value": "postman-demo"
+          },
+          {
+            "key": "X-Internal-API-Key",
+            "value": "{{aiApiKey}}"
+          }
+        ],
+        "url": "{{aiBaseUrl}}/internal/v1/assets/{{assetId}}"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Không có lỗi server ngoài dự kiến', function () { pm.expect(pm.response.code).to.be.below(500); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "DELETE /internal/v1/assets/{asset_id}",
+      "request": {
+        "method": "DELETE",
+        "header": [
+          {
+            "key": "X-Correlation-ID",
+            "value": "postman-demo"
+          },
+          {
+            "key": "X-Internal-API-Key",
+            "value": "{{aiApiKey}}"
+          }
+        ],
+        "url": "{{aiBaseUrl}}/internal/v1/assets/{{assetId}}"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Không có lỗi server ngoài dự kiến', function () { pm.expect(pm.response.code).to.be.below(500); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "GET /internal/v1/assets/{asset_id}/content",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "X-Correlation-ID",
+            "value": "postman-demo"
+          },
+          {
+            "key": "X-Internal-API-Key",
+            "value": "{{aiApiKey}}"
+          }
+        ],
+        "url": "{{aiBaseUrl}}/internal/v1/assets/{{assetId}}/content"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Không có lỗi server ngoài dự kiến', function () { pm.expect(pm.response.code).to.be.below(500); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "POST /internal/v1/persons/validate",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "X-Correlation-ID",
+            "value": "postman-demo"
+          },
+          {
+            "key": "X-Internal-API-Key",
+            "value": "{{aiApiKey}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{aiBaseUrl}}/internal/v1/persons/validate",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"assetId\": \"{{personAssetId}}\",\n  \"vtonCategory\": \"upper_body\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Không có lỗi server ngoài dự kiến', function () { pm.expect(pm.response.code).to.be.below(500); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "POST /internal/v1/routing/preview",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "X-Correlation-ID",
+            "value": "postman-demo"
+          },
+          {
+            "key": "X-Internal-API-Key",
+            "value": "{{aiApiKey}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{aiBaseUrl}}/internal/v1/routing/preview",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"vtonCategory\": \"dress\",\n  \"personFrame\": \"full_body\",\n  \"garmentSubtype\": \"sling_dress\",\n  \"garmentLength\": \"LONG\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Không có lỗi server ngoài dự kiến', function () { pm.expect(pm.response.code).to.be.below(500); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "POST /internal/v1/products/analyze",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "X-Correlation-ID",
+            "value": "postman-demo"
+          },
+          {
+            "key": "X-Internal-API-Key",
+            "value": "{{aiApiKey}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{aiBaseUrl}}/internal/v1/products/analyze",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"analysisId\": \"{{analysisId}}\",\n  \"productId\": \"SP001\",\n  \"productAssetIds\": [\n    \"{{garmentAssetId}}\"\n  ],\n  \"referenceAssetIds\": [],\n  \"categoryOverride\": \"upper_body\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Không có lỗi server ngoài dự kiến', function () { pm.expect(pm.response.code).to.be.below(500); });",
+              "if (pm.response.code === 202) pm.environment.set('jobId', pm.response.json().jobId);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "POST /internal/v1/try-on/jobs",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "X-Correlation-ID",
+            "value": "postman-demo"
+          },
+          {
+            "key": "X-Internal-API-Key",
+            "value": "{{aiApiKey}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{aiBaseUrl}}/internal/v1/try-on/jobs",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"sessionId\": \"{{sessionId}}\",\n  \"productId\": \"SP001\",\n  \"variantId\": \"BT001\",\n  \"personAssetId\": \"{{personAssetId}}\",\n  \"garmentAssetId\": \"{{garmentAssetId}}\",\n  \"vtonCategory\": \"upper_body\",\n  \"garmentSubtype\": \"sling\",\n  \"garmentLength\": \"UNKNOWN\",\n  \"seed\": 42,\n  \"steps\": 20,\n  \"samples\": 1\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Không có lỗi server ngoài dự kiến', function () { pm.expect(pm.response.code).to.be.below(500); });",
+              "if (pm.response.code === 202) pm.environment.set('jobId', pm.response.json().jobId);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "GET /internal/v1/jobs",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "X-Correlation-ID",
+            "value": "postman-demo"
+          },
+          {
+            "key": "X-Internal-API-Key",
+            "value": "{{aiApiKey}}"
+          }
+        ],
+        "url": "{{aiBaseUrl}}/internal/v1/jobs"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Không có lỗi server ngoài dự kiến', function () { pm.expect(pm.response.code).to.be.below(500); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "GET /internal/v1/jobs/{job_id}",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "X-Correlation-ID",
+            "value": "postman-demo"
+          },
+          {
+            "key": "X-Internal-API-Key",
+            "value": "{{aiApiKey}}"
+          }
+        ],
+        "url": "{{aiBaseUrl}}/internal/v1/jobs/{{jobId}}"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Không có lỗi server ngoài dự kiến', function () { pm.expect(pm.response.code).to.be.below(500); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "GET /internal/v1/try-on/jobs/{session_id}",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "X-Correlation-ID",
+            "value": "postman-demo"
+          },
+          {
+            "key": "X-Internal-API-Key",
+            "value": "{{aiApiKey}}"
+          }
+        ],
+        "url": "{{aiBaseUrl}}/internal/v1/try-on/jobs/{{sessionId}}"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Không có lỗi server ngoài dự kiến', function () { pm.expect(pm.response.code).to.be.below(500); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "POST /internal/v1/jobs/{job_id}/cancel",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "X-Correlation-ID",
+            "value": "postman-demo"
+          },
+          {
+            "key": "X-Internal-API-Key",
+            "value": "{{aiApiKey}}"
+          }
+        ],
+        "url": "{{aiBaseUrl}}/internal/v1/jobs/{{jobId}}/cancel"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Không có lỗi server ngoài dự kiến', function () { pm.expect(pm.response.code).to.be.below(500); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "POST /internal/v1/jobs/{job_id}/retry",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "X-Correlation-ID",
+            "value": "postman-demo"
+          },
+          {
+            "key": "X-Internal-API-Key",
+            "value": "{{aiApiKey}}"
+          }
+        ],
+        "url": "{{aiBaseUrl}}/internal/v1/jobs/{{jobId}}/retry"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Không có lỗi server ngoài dự kiến', function () { pm.expect(pm.response.code).to.be.below(500); });"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

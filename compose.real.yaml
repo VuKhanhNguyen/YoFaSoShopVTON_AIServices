@@ -1,0 +1,14 @@
+# Dùng: docker compose -f compose.yaml -f compose.real.yaml --profile gpu up -d --build
+# API real cần detector CPU, nên dùng cùng image thư viện GPU nhưng không cấp GPU cho API.
+services:
+  ai-api:
+    build:
+      dockerfile: Dockerfile.gpu
+    command: [python, -m, uvicorn, "api.main:app", --host, "0.0.0.0", --port, "8000", --workers, "1"]
+    environment:
+      AI_MODE: real
+      EMBEDDED_WORKER: "false"
+      VISION_DEVICE: cpu
+      HF_HOME: /app/.cache/huggingface
+    volumes:
+      - "${HOST_HF_CACHE_DIR:-./.cache/huggingface}:/app/.cache/huggingface"

@@ -1,0 +1,50 @@
+services:
+  ai-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    env_file: .env
+    environment:
+      RUNTIME_DIR: /app/data/runtime
+      OOTD_ROOT: /app/api/models/ootdiffusion
+      DEEPFASHION_WEIGHTS: /app/weights/deepfashion2_yolov8s-seg.pt
+      POSE_WEIGHTS: /app/weights/yolo26s-pose.pt
+    ports:
+      - "${AI_BIND_HOST:-127.0.0.1}:${AI_HOST_PORT:-8000}:8000"
+    volumes:
+      - "${HOST_RUNTIME_DIR:-./data/runtime}:/app/data/runtime"
+      - "${HOST_WEIGHTS_DIR:-./weights}:/app/weights:ro"
+      - "${HOST_OOTD_DIR:-./api/models/ootdiffusion}:/app/api/models/ootdiffusion:ro"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+  gpu-worker:
+    profiles: [gpu]
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    env_file: .env
+    environment:
+      AI_MODE: real
+      EMBEDDED_WORKER: "false"
+      RUNTIME_DIR: /app/data/runtime
+      OOTD_ROOT: /app/api/models/ootdiffusion
+      DEEPFASHION_WEIGHTS: /app/weights/deepfashion2_yolov8s-seg.pt
+      POSE_WEIGHTS: /app/weights/yolo26s-pose.pt
+      HF_HOME: /app/.cache/huggingface
+    volumes:
+      - "${HOST_RUNTIME_DIR:-./data/runtime}:/app/data/runtime"
+      - "${HOST_WEIGHTS_DIR:-./weights}:/app/weights:ro"
+      - "${HOST_OOTD_DIR:-./api/models/ootdiffusion}:/app/api/models/ootdiffusion:ro"
+      - "${HOST_HF_CACHE_DIR:-./.cache/huggingface}:/app/.cache/huggingface"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_DEVICE_ID:-0}"]
+              capabilities: [gpu]
+    restart: unless-stopped

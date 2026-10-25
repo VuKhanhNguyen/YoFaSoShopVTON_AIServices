@@ -1,0 +1,68 @@
+# Python & Virtual Environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.env
+.venv/
+venv/
+ENV/
+env/
+.conda/
+
+# Mặc định bỏ weights. Các ngoại lệ bên dưới được quản lý bằng Git LFS.
+weights/*.pt
+weights/*.pth
+weights/*.safetensors
+weights/**/*.pt
+weights/**/*.pth
+weights/**/*.safetensors
+weights/pth/
+api/models/**/ckpt/
+*.pt
+*.pth
+*.safetensors
+*.bin
+*.pkl
+*.onnx
+
+# Chỉ whitelist tài nguyên có thể lưu LFS; không tự add/commit/push.
+!weights/deepfashion2_yolov8s-seg.pt
+!weights/yolov8n-pose.pt
+!weights/yolo26s-pose.pt
+!weights/resnet50_attr_model_best_clean.pth
+!weights/resnet50_attr_model_best_fp16.pth
+!api/models/unet_resnet50/model.safetensors
+
+# Model bỏ dùng, bản sao lớn và OOTDiffusion có nguồn tải: không upload lại.
+api/models/idm-vton/
+# api/models/ootdiffusion/checkpoints/
+# api/models/ootdiffusion/.cache/
+# api/models/ootdiffusion/preprocess/humanparsing/mhp_extension/detectron2/datasets/
+weights/resnet50_attr_latest_clean.pth
+
+# Raw Datasets (Dung lượng lớn hàng GB)
+data/raw/
+data/processed/
+*.zip
+*.tar.gz
+
+# IDE & OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+scratch/
+.venv*/
+.pytest_cache/
+.ruff_cache/
+.coverage*
+htmlcov/
+.cache/
+data/runtime*/
+data/test-runtime*/
+data/test-fixtures/
+*.log
+*.sqlite3*
+data/probe/
