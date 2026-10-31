@@ -1,5 +1,6 @@
 """Factory phục vụ runtime và test: không yêu cầu khóa thật lúc import test."""
 import logging
+import asyncio
 import re
 import secrets
 import threading
@@ -30,7 +31,7 @@ LOG = logging.getLogger("yofaso.api")
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Lắp API, dependencies và lifespan; không import/load model diffusion ở đây."""
     settings = settings or Settings()
-    store = Store(settings.runtime_dir)
+    store = Store(settings)
     assets = Assets(settings, store)
     vision = Vision(settings)
     rate_buckets = defaultdict(deque)
@@ -39,6 +40,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app):
         """Chỉ embedded worker mock để test; production chạy process worker riêng."""
+        deadline = time.monotonic() + 60
+        while True:
+            try:
+                await asyncio.to_thread(store.check_schema)
+                break
+            except ServiceError:
+                if time.monotonic() >= deadline:
+                    raise
+                await asyncio.sleep(1)
         worker = thread = None
         if settings.embedded_worker:
             from workers.runner import Worker
@@ -51,7 +61,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             thread.join(timeout=10)
 
     app = FastAPI(title="YoFaSoShop Internal AI API", version="1.0.0", lifespan=lifespan,
-                  description="API AI nội bộ. Mock luôn đánh dấu simulated; không chứa nghiệp vụ đơn hàng/điểm thẩm mỹ.",
+                  description="API AI Services cho VTON, không chứa nghiệp vụ đơn hàng/điểm thẩm mỹ.",
                   docs_url="/docs" if settings.expose_docs else None, redoc_url=None,
                   openapi_url="/openapi.json" if settings.expose_docs else None)
     app.state.settings, app.state.store, app.state.assets = settings, store, assets
@@ -116,7 +126,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         bucket.append(timestamp)
                     remaining = max(0, settings.rate_limit_per_minute - len(bucket))
                     reset = int(bucket[0] + 60) + 1 if bucket else int(timestamp + 60)
-            response = error_response(request, "RATE_LIMITED", "Đã vượt số request/phút; vui lòng đợi.", 429, retryable=True) if limited else await call_next(request)
+            # Từ chối trước multipart parser: request thiếu key không được spool file lên disk.
+            if request.url.path.startswith("/internal/") and not valid_key:
+                response = error_response(request, "UNAUTHORIZED", "Khóa kết nối AI không hợp lệ.", 401)
+            elif limited:
+                response = error_response(request, "RATE_LIMITED", "Đã vượt số request/phút; vui lòng đợi.", 429, retryable=True)
+            else:
+                response = await call_next(request)
             response.headers.update({"X-RateLimit-Limit": str(settings.rate_limit_per_minute), "X-RateLimit-Remaining": str(remaining), "X-RateLimit-Reset": str(reset)})
             if limited:
                 response.headers["Retry-After"] = str(max(1, reset - int(time.time())))
@@ -141,9 +157,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health/ready", tags=["Health"], responses={503: {"model": ErrorResponse}})
     def ready():
         """Queue storage + heartbeat + file checkpoint; chưa thay inference nghiệm thu."""
-        with store.connection() as db:
-            heartbeat = db.execute("SELECT * FROM worker WHERE id=1").fetchone()
-        worker_ready = bool(heartbeat and heartbeat["mode"] == settings.ai_mode and time.time() - heartbeat["heartbeat"] < settings.worker_lease_seconds)
+        heartbeat = store.heartbeat()
+        worker_ready = bool(heartbeat and heartbeat["heartbeat"] is not None and heartbeat["mode"] == settings.ai_mode and time.time() - heartbeat["heartbeat"] < settings.worker_lease_seconds)
         files_ready = settings.ai_mode == "mock" or all(p.is_file() for p in (settings.deepfashion_weights, settings.pose_weights, settings.ootd_root / "checkpoints/ootd/model_index.json"))
         if not worker_ready or not files_ready:
             raise ServiceError("SERVICE_NOT_READY", "Worker chưa sẵn sàng hoặc thiếu checkpoint.", 503)
@@ -152,14 +167,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @router.get("/config-check", tags=["System"])
     def config_check():
         """Kiểm tra cấu hình không lộ secret hoặc absolute path."""
-        return {"env": settings.app_env, "mode": settings.ai_mode, "simulated": settings.ai_mode == "mock", "queueBackend": "sqlite", "vtonReady": False}
+        return {"env": settings.app_env, "mode": settings.ai_mode, "simulated": settings.ai_mode == "mock", "queueBackend": "file-manifest", "vtonReady": False}
 
     @router.get("/capabilities", tags=["System"])
     def capabilities():
         """Liệt kê phạm vi AI, category và giới hạn để BE xây form phù hợp."""
         return {"apiVersion": "1.0.0", "mode": settings.ai_mode, "simulated": settings.ai_mode == "mock",
                 "categories": ["upper_body", "lower_body", "dress"], "subtypes": sorted(UPPER | LOWER | DRESSES),
-                "queueBackend": "sqlite", "scoringOwner": "Spring Boot", "maxUploadBytes": settings.max_upload_bytes,
+                "queueBackend": "file-manifest", "scoringOwner": "Spring Boot", "maxUploadBytes": settings.max_upload_bytes,
                 "maxVariants": settings.max_variants, "maxSamples": 4}
 
     @router.get("/models", tags=["System"])
@@ -222,7 +237,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @router.post("/products/analyze", response_model=JobResponse, status_code=202, tags=["Jobs"])
     def analyze_product(body: ProductRequest):
-        """Enqueue phân tích catalog, không tự ghi MySQL hay công bố sản phẩm."""
+        """Enqueue vào manifest AI; không sửa bảng catalog hay tự công bố sản phẩm."""
         if len(body.product_asset_ids) > settings.max_variants:
             raise ServiceError("TOO_MANY_VARIANTS", "Vượt số ảnh biến thể cho phép.")
         validate_assets(body.product_asset_ids, {"garment"})
@@ -241,11 +256,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @router.get("/jobs", tags=["Jobs"])
     def list_jobs(limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0), status: Status | None = None):
         """Phân trang job cho service quản trị; không chứa ảnh/input nhạy cảm."""
-        where, params = ("WHERE status=?", [status.value]) if status else ("", [])
-        with store.connection() as db:
-            total = db.execute(f"SELECT count(*) FROM jobs {where}", params).fetchone()[0]
-            rows = db.execute(f"SELECT * FROM jobs {where} ORDER BY created_at DESC LIMIT ? OFFSET ?", params + [limit, offset]).fetchall()
-        return {"items": [store.public_job(dict(row)) for row in rows], "total": total, "limit": limit, "offset": offset}
+        return store.list_jobs(limit, offset, status.value if status else None)
 
     @router.get("/jobs/{job_id}", response_model=JobResponse, tags=["Jobs"])
     def get_job(job_id: str):
@@ -255,11 +266,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @router.get("/try-on/jobs/{session_id}", response_model=JobResponse, tags=["Jobs"])
     def get_session(session_id: str):
         """BE tra bằng sessionId khi chưa nhận response submit do mất mạng."""
-        with store.connection() as db:
-            row = db.execute("SELECT * FROM jobs WHERE kind='TRY_ON' AND business_id=?", (session_id,)).fetchone()
-        if not row:
-            raise ServiceError("JOB_NOT_FOUND", "Không tìm thấy phiên thử đồ.", 404)
-        return store.public_job(dict(row))
+        return store.public_job(store.find_job("TRY_ON", session_id))
 
     @router.post("/jobs/{job_id}/cancel", response_model=JobResponse, tags=["Jobs"])
     def cancel_job(job_id: str):

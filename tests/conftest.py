@@ -14,8 +14,8 @@ KEY = "test-key-" + "a" * 40
 @pytest.fixture
 def settings(tmp_path):
     """Mỗi test có DB/asset độc lập và không đọc .env của người dùng."""
-    return Settings(_env_file=None, ai_internal_api_key=KEY, app_env="test", ai_mode="mock", runtime_dir=tmp_path,
-                    embedded_worker=False, rate_limit_per_minute=10000)
+    yield Settings(_env_file=None, ai_internal_api_key=KEY, app_env="test", ai_mode="mock", runtime_dir=tmp_path,
+                   embedded_worker=False, rate_limit_per_minute=10000)
 
 
 @pytest.fixture

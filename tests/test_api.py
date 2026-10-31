@@ -176,7 +176,7 @@ def test_cancel_retry_queue_and_persistence(client, settings, tryon_payload):
     assert client.post(PREFIX + "/try-on/jobs", json={**tryon_payload, "sessionId": "TD2"}).status_code == 429
     assert client.post(PREFIX + f"/jobs/{job['jobId']}/cancel").json()["status"] == "CANCELLED"
     assert client.post(PREFIX + f"/jobs/{job['jobId']}/cancel").status_code == 200
-    assert Store(settings.runtime_dir).job(job["jobId"])["status"] == "CANCELLED"
+    assert Store(settings).job(job["jobId"])["status"] == "CANCELLED"
     assert client.get(PREFIX + "/jobs/not-found").status_code == 404
     assert client.post(PREFIX + "/jobs/not-found/retry").status_code == 404
 
@@ -184,12 +184,12 @@ def test_cancel_retry_queue_and_persistence(client, settings, tryon_payload):
 def test_transient_retry(client, settings, tryon_payload):
     """Retry chỉ lỗi tạm và không vượt attempts; transaction không enqueue trùng."""
     row = client.post(PREFIX + "/try-on/jobs", json=tryon_payload).json()
-    store = Store(settings.runtime_dir)
+    store = Store(settings)
     claimed = store.claim()
-    store.finish(claimed["id"], error={"errorCode": "JOB_TIMEOUT", "retryable": True})
+    store.finish(claimed["id"], claim_token=claimed["claim_token"], error={"errorCode": "JOB_TIMEOUT", "retryable": True})
     assert client.post(PREFIX + f"/jobs/{row['jobId']}/retry").json()["status"] == "QUEUED"
-    store.claim()
-    store.finish(claimed["id"], error={"errorCode": "JOB_TIMEOUT", "retryable": True})
+    claimed = store.claim()
+    store.finish(claimed["id"], claim_token=claimed["claim_token"], error={"errorCode": "JOB_TIMEOUT", "retryable": True})
     assert client.post(PREFIX + f"/jobs/{row['jobId']}/retry").status_code == 409
 
 
@@ -220,17 +220,17 @@ def test_rate_limit(settings):
 def test_security_config(settings):
     """Không cho chạy production/mock, không khởi động với khóa mẫu."""
     with pytest.raises(ValueError):
-        Settings(_env_file=None, ai_internal_api_key="CHANGE_ME")
+        Settings(_env_file=None, ai_mysql_password="test-password", ai_internal_api_key="CHANGE_ME")
     with pytest.raises(ValueError):
-        Settings(_env_file=None, ai_internal_api_key="k" * 40, app_env="production", ai_mode="mock")
+        Settings(_env_file=None, ai_mysql_password="test-password", ai_internal_api_key="k" * 40, app_env="production", ai_mode="mock")
     with pytest.raises(ValueError):
-        Settings(_env_file=None, ai_internal_api_key="k" * 40, ai_mode="real", embedded_worker=True)
+        Settings(_env_file=None, ai_mysql_password="test-password", ai_internal_api_key="k" * 40, ai_mode="real", embedded_worker=True)
 
 
 def test_concurrent_idempotency(client, settings, tryon_payload):
     """20 caller cùng submit qua DB chỉ tạo một job (không đo throughput inference)."""
     client.post(PREFIX + "/try-on/jobs", json=tryon_payload)
-    store = Store(settings.runtime_dir)
+    store = Store(settings)
     payload = __import__("api.schemas", fromlist=["TryOnRequest"]).TryOnRequest(**tryon_payload).model_dump(by_alias=True)
     with ThreadPoolExecutor(max_workers=10) as pool:
         rows = list(pool.map(lambda _: store.submit("TRY_ON", "TD001", payload, [tryon_payload["personAssetId"], tryon_payload["garmentAssetId"]], "mock", 20), range(20)))

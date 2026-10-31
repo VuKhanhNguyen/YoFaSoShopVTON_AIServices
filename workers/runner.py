@@ -12,7 +12,7 @@ from contextlib import contextmanager
 
 from api.core.config import Settings
 from api.core.errors import ServiceError
-from api.core.store import Store, now
+from api.core.store import Store
 
 LOGGER = logging.getLogger("yofaso.worker")
 
@@ -44,7 +44,7 @@ def child_loop(config, connection):
 
 @contextmanager
 def worker_lock(root):
-    """Khóa OS tự giải phóng khi crash; dùng local filesystem, không NFS/SQLite network."""
+    """Khóa GPU cục bộ; API/worker dùng cùng volume trên một host."""
     root.mkdir(parents=True, exist_ok=True)
     handle = (root / "worker.lock").open("a+b")
     try:
@@ -74,15 +74,19 @@ class Worker:
         """Khởi tạo parent watchdog; child_target có thể thay khi test timeout."""
         self.settings = settings
         self.child_target = child_target
-        self.store = Store(settings.runtime_dir)
+        self.store = Store(settings)
         self.stop = threading.Event()
         self.process = self.connection = None
         self.pipeline = None
+        self.lease_connection = None
 
     def heartbeat(self):
         """Cho health/ready biết worker sống, không đồng nghĩa model GPU đã nghiệm thu."""
-        with self.store.connection() as db:
-            db.execute("INSERT OR REPLACE INTO worker VALUES(1,?,?)", (time.time(), self.settings.ai_mode))
+        self.write_heartbeat(time.time(), self.settings.ai_mode)
+
+    def write_heartbeat(self, timestamp, mode):
+        """Heartbeat ghi nguyên tử vào manifest trong khi worker giữ khóa OS."""
+        self.store.heartbeat(timestamp, mode, write=True)
 
     def shutdown_child(self):
         """Đóng child chắc chắn trước khi cấp GPU cho job tiếp theo."""
@@ -135,21 +139,22 @@ class Worker:
         job = self.store.claim()
         if not job:
             return False
+        started = time.perf_counter()
         try:
             result = self.execute(job)
+            result["processingSeconds"] = round(time.perf_counter() - started, 2)
             json.dumps(result, allow_nan=False)
-            self.store.finish(job["id"], result=result)
+            self.heartbeat()
+            self.store.finish(job["id"], claim_token=job["claim_token"], result=result)
         except BaseException as exc:
             LOGGER.exception("job_failed jobId=%s", job["id"])
-            self.store.finish(job["id"], error=error_data(exc))
+            self.store.finish(job["id"], claim_token=job["claim_token"], error=error_data(exc))
         return True
 
     def serve(self):
         """Khôi phục PROCESSING bị ngắt sau crash; không tự chạy lại GPU job cũ."""
         with worker_lock(self.settings.runtime_dir):
-            with self.store.connection() as db:
-                error = json.dumps({"errorCode": "WORKER_INTERRUPTED", "message": "Worker đã dừng giữa chừng; có thể retry.", "retryable": True})
-                db.execute("UPDATE jobs SET status='FAILED',error=?,updated_at=? WHERE status='PROCESSING'", (error, now()))
+            self.store.recover()
             try:
                 while not self.stop.is_set():
                     self.heartbeat()
@@ -157,8 +162,10 @@ class Worker:
                         self.stop.wait(self.settings.worker_poll_seconds)
             finally:
                 self.shutdown_child()
-                with self.store.connection() as db:
-                    db.execute("DELETE FROM worker WHERE id=1")
+                try:
+                    self.write_heartbeat(None, None)
+                finally:
+                    self.lease_connection = None
 
 
 def main():

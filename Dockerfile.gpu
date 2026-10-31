@@ -8,4 +8,7 @@ RUN pip install --no-cache-dir -r requirements-gpu.txt && pip check
 COPY api /app/api
 COPY workers /app/workers
 COPY scripts /app/scripts
+RUN mkdir -p /app/data/runtime /app/.cache/huggingface && chown -R 10001:10001 /app/data /app/.cache
+ENV HOME=/app XDG_CACHE_HOME=/app/.cache YOLO_CONFIG_DIR=/app/.cache/ultralytics TORCH_HOME=/app/.cache/torch
+USER 10001:10001
 CMD ["python", "-m", "workers.runner"]

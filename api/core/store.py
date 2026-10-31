@@ -1,150 +1,219 @@
-"""SQLite lưu metadata và queue bền vững trên một máy, transaction chống enqueue trùng."""
+"""Manifest runtime bền vững, không kết nối SQL và không tạo entity ngoài ERD.
+
+API và một worker dùng chung volume trên MỘT host. Khóa file liên process;
+ghi temp + fsync + os.replace. Không giữ khóa khi chạy inference.
+"""
 import hashlib
 import json
-import sqlite3
+import os
+import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from pathlib import Path
 from uuid import uuid4
 
 from api.core.errors import ServiceError
 
 
-def now() -> str:
-    """Timestamp UTC thống nhất cho API, SQLite và worker."""
+def now():
     return datetime.now(timezone.utc).isoformat()
 
 
-class Store:
-    """Mỗi thao tác mở connection riêng; API/worker dùng chung file trên local disk."""
+_locks = {}
+_guard = threading.Lock()
 
-    def __init__(self, root: Path):
-        """Tạo schema nếu chưa có, giữ nguyên job/asset khi API restart."""
-        self.root = root
-        root.mkdir(parents=True, exist_ok=True)
-        self.db = root / "state.sqlite3"
-        with self.connection() as db:
-            db.executescript("""
-            PRAGMA journal_mode=WAL;
-            CREATE TABLE IF NOT EXISTS assets (
-              id TEXT PRIMARY KEY, role TEXT NOT NULL, width INT, height INT,
-              bytes INT, sha256 TEXT, created_at TEXT, simulated INT DEFAULT 0);
-            CREATE TABLE IF NOT EXISTS jobs (
-              id TEXT PRIMARY KEY, kind TEXT, business_id TEXT, payload TEXT,
-              fingerprint TEXT, status TEXT, created_at TEXT, updated_at TEXT,
-              attempts INT DEFAULT 0, simulated INT, result TEXT, error TEXT,
-              UNIQUE(kind,business_id));
-            CREATE TABLE IF NOT EXISTS job_assets (
-              job_id TEXT REFERENCES jobs(id) ON DELETE CASCADE,
-              asset_id TEXT REFERENCES assets(id), PRIMARY KEY(job_id,asset_id));
-            CREATE INDEX IF NOT EXISTS queue_status ON jobs(status,created_at);
-            CREATE TABLE IF NOT EXISTS worker (id INT PRIMARY KEY, heartbeat REAL, mode TEXT);
-            """)
+
+class Store:
+    def __init__(self, settings):
+        self.settings = settings
+        self.root = settings.runtime_dir.resolve()
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.manifest = self.root / "runtime.json"
+        with _guard:
+            self.lock = _locks.setdefault(str(self.root), threading.RLock())
 
     @contextmanager
-    def connection(self):
-        """Bật foreign key, timeout và commit/rollback; không chia connection giữa thread."""
-        db = sqlite3.connect(self.db, timeout=10)
-        db.row_factory = sqlite3.Row
-        db.execute("PRAGMA foreign_keys=ON")
-        try:
-            yield db
-            db.commit()
-        except BaseException:
-            db.rollback()
-            raise
-        finally:
-            db.close()
+    def state(self):
+        """Rollback thay đổi trong RAM nếu domain error; file lỗi được báo, không tự xóa."""
+        with self.lock, (self.root / "manifest.lock").open("a+b") as handle:
+            if handle.seek(0, 2) == 0:
+                handle.write(b"0")
+                handle.flush()
+            handle.seek(0)
+            deadline = time.monotonic() + 10
+            while True:
+                try:
+                    if os.name == "nt":
+                        import msvcrt
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise ServiceError("STORAGE_BUSY", "Runtime đang bận.", 503, retryable=True)
+                    time.sleep(.02)
+            try:
+                data = json.loads(self.manifest.read_text("utf-8")) if self.manifest.exists() else {
+                    "version": 1, "assets": {}, "jobs": {}, "references": {}, "heartbeat": {}}
+                if data.get("version") != 1:
+                    raise ValueError("Unsupported runtime version")
+                before = json.dumps(data, sort_keys=True, ensure_ascii=False, allow_nan=False)
+                yield data
+                encoded = json.dumps(data, sort_keys=True, ensure_ascii=False, allow_nan=False)
+                if before != encoded or not self.manifest.exists():
+                    temporary = self.root / (uuid4().hex + ".json.tmp")
+                    try:
+                        with temporary.open("x", encoding="utf-8") as output:
+                            output.write(encoded)
+                            output.flush()
+                            os.fsync(output.fileno())
+                        os.replace(temporary, self.manifest)
+                    finally:
+                        temporary.unlink(missing_ok=True)
+            except (OSError, ValueError, KeyError) as exc:
+                raise ServiceError("STORAGE_UNAVAILABLE", "Manifest runtime lỗi; phục hồi từ bản sao lưu.", 503) from exc
+            finally:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
-    def asset(self, asset_id: str) -> dict:
-        """Chỉ đọc ID đã tồn tại; không nhận đường dẫn do client cung cấp."""
-        with self.connection() as db:
-            row = db.execute("SELECT * FROM assets WHERE id=?", (asset_id,)).fetchone()
+    def check_schema(self):
+        """Chỉ kiểm tra manifest, không chạy migration/database."""
+        with self.state():
+            pass
+
+    def asset(self, asset_id):
+        if not isinstance(asset_id, str) or len(asset_id) != 32 or any(c not in "0123456789abcdef" for c in asset_id):
+            raise ServiceError("ASSET_NOT_FOUND", "Không tìm thấy ảnh.", 404)
+        with self.state() as data:
+            row = data["assets"].get(asset_id)
         if not row:
             raise ServiceError("ASSET_NOT_FOUND", "Không tìm thấy ảnh.", 404)
-        return dict(row)
+        return row
 
-    def public_asset(self, row: dict) -> dict:
-        """Che path server và tên file upload khỏi response."""
+    def register_asset(self, row, job_id=None):
+        with self.state() as data:
+            if job_id and job_id not in data["jobs"]:
+                raise ServiceError("JOB_NOT_FOUND", "Không tìm thấy job.", 404)
+            data["assets"][row["id"]] = row
+            if job_id:
+                refs = data["references"].setdefault(job_id, [])
+                refs.append(row["id"])
+
+    def delete_asset(self, asset_id):
+        with self.state() as data:
+            if asset_id not in data["assets"]:
+                raise ServiceError("ASSET_NOT_FOUND", "Không tìm thấy ảnh.", 404)
+            if any(asset_id in refs for refs in data["references"].values()):
+                raise ServiceError("ASSET_IN_USE", "Ảnh được job tham chiếu.", 409)
+            del data["assets"][asset_id]
+
+    def public_asset(self, row):
         return {"assetId": row["id"], "role": row["role"], "width": row["width"], "height": row["height"],
                 "bytes": row["bytes"], "sha256": row["sha256"], "createdAt": row["created_at"],
                 "contentUrl": f"/internal/v1/assets/{row['id']}/content", "simulated": bool(row["simulated"])}
 
-    def job(self, job_id: str) -> dict:
-        """Đọc snapshot công việc; lỗi 404 thay vì response null không rõ nghĩa."""
-        with self.connection() as db:
-            row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+    def job(self, job_id):
+        with self.state() as data:
+            row = data["jobs"].get(job_id)
         if not row:
             raise ServiceError("JOB_NOT_FOUND", "Không tìm thấy công việc.", 404)
-        return dict(row)
+        return row
 
-    def public_job(self, row: dict) -> dict:
-        """Giải mã result/error; không công bố input chứa thông tin riêng tư."""
-        return {"jobId": row["id"], "kind": row["kind"], "businessId": row["business_id"],
-                "status": row["status"], "createdAt": row["created_at"], "updatedAt": row["updated_at"],
-                "attempts": row["attempts"], "simulated": bool(row["simulated"]),
-                "result": json.loads(row["result"]) if row["result"] else None,
+    def find_job(self, kind, business_id):
+        with self.state() as data:
+            row = next((r for r in data["jobs"].values() if r["kind"] == kind and r["business_id"] == business_id), None)
+        if not row:
+            raise ServiceError("JOB_NOT_FOUND", "Không tìm thấy công việc.", 404)
+        return row
+
+    def list_jobs(self, limit, offset, status=None):
+        with self.state() as data:
+            rows = sorted((r for r in data["jobs"].values() if not status or r["status"] == status),
+                          key=lambda r: (r["created_at"], r["id"]), reverse=True)
+        return {"items": [self.public_job(r) for r in rows[offset:offset+limit]], "total": len(rows), "limit": limit, "offset": offset}
+
+    def public_job(self, row):
+        return {"jobId": row["id"], "kind": row["kind"], "businessId": row["business_id"], "status": row["status"],
+                "createdAt": row["created_at"], "updatedAt": row["updated_at"], "attempts": row["attempts"],
+                "simulated": bool(row["simulated"]), "result": json.loads(row["result"]) if row["result"] else None,
                 "error": json.loads(row["error"]) if row["error"] else None}
 
-    def submit(self, kind: str, business_id: str, payload: dict, asset_ids: list[str], mode: str, max_queue: int) -> dict:
-        """Tạo job và giữ asset trong cùng transaction; ID cũ khác payload trả 409."""
-        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    def submit(self, kind, business_id, payload, asset_ids, mode, max_queue):
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
         fingerprint = hashlib.sha256((mode + encoded).encode()).hexdigest()
-        with self.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
-            old = db.execute("SELECT * FROM jobs WHERE kind=? AND business_id=?", (kind, business_id)).fetchone()
-            if old:
-                if old["fingerprint"] != fingerprint:
-                    raise ServiceError("IDEMPOTENCY_CONFLICT", "ID này đã được dùng với nội dung khác.", 409)
-                return dict(old)
-            count = db.execute("SELECT count(*) FROM jobs WHERE status IN ('QUEUED','PROCESSING')").fetchone()[0]
-            if count >= max_queue:
-                raise ServiceError("QUEUE_FULL", "Hàng đợi đã đầy, vui lòng thử sau.", 429, retryable=True)
-            for asset_id in set(asset_ids):
-                if not db.execute("SELECT 1 FROM assets WHERE id=?", (asset_id,)).fetchone():
-                    raise ServiceError("ASSET_NOT_FOUND", "Một ảnh đầu vào không tồn tại.", 404)
-            job_id, timestamp = uuid4().hex, now()
-            db.execute("INSERT INTO jobs(id,kind,business_id,payload,fingerprint,status,created_at,updated_at,simulated) VALUES(?,?,?,?,?,'QUEUED',?,?,?)",
-                       (job_id, kind, business_id, encoded, fingerprint, timestamp, timestamp, int(mode == "mock")))
-            db.executemany("INSERT INTO job_assets VALUES(?,?)", [(job_id, aid) for aid in set(asset_ids)])
-        return self.job(job_id)
+        with self.state() as data:
+            for row in data["jobs"].values():
+                if row["kind"] == kind and row["business_id"] == business_id:
+                    if row["fingerprint"] != fingerprint:
+                        raise ServiceError("IDEMPOTENCY_CONFLICT", "ID đã dùng với nội dung khác.", 409)
+                    return row
+            if sum(r["status"] in {"QUEUED", "PROCESSING"} for r in data["jobs"].values()) >= max_queue:
+                raise ServiceError("QUEUE_FULL", "Hàng đợi đã đầy.", 429, retryable=True)
+            if any(a not in data["assets"] for a in asset_ids):
+                raise ServiceError("ASSET_NOT_FOUND", "Ảnh không tồn tại.", 404)
+            identifier, timestamp = uuid4().hex, now()
+            row = dict(id=identifier, kind=kind, business_id=business_id, payload=encoded, fingerprint=fingerprint,
+                       status="QUEUED", attempts=0, created_at=timestamp, updated_at=timestamp,
+                       simulated=int(mode == "mock"), result=None, error=None, claim_token=None)
+            data["jobs"][identifier] = row
+            data["references"][identifier] = sorted(set(asset_ids))
+        return row
 
-    def claim(self) -> dict | None:
-        """Claim atomically; worker file lock bảo đảm chỉ một GPU worker trên runtime."""
-        with self.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT * FROM jobs WHERE status='QUEUED' ORDER BY created_at LIMIT 1").fetchone()
-            if not row:
+    def claim(self):
+        with self.state() as data:
+            rows = sorted((r for r in data["jobs"].values() if r["status"] == "QUEUED"), key=lambda r: (r["created_at"], r["id"]))
+            if not rows:
                 return None
-            db.execute("UPDATE jobs SET status='PROCESSING', attempts=attempts+1, updated_at=? WHERE id=?", (now(), row["id"]))
-        return self.job(row["id"])
+            row = rows[0]
+            row.update(status="PROCESSING", attempts=row["attempts"]+1, updated_at=now(), claim_token=uuid4().hex)
+        return row
 
-    def finish(self, job_id: str, result=None, error=None):
-        """Chỉ publish kết quả sau khi pipeline và ghi asset đã thành công."""
-        with self.connection() as db:
-            db.execute("UPDATE jobs SET status=?,result=?,error=?,updated_at=? WHERE id=? AND status='PROCESSING'",
-                       ("FAILED" if error else "COMPLETED", json.dumps(result, ensure_ascii=False) if result is not None else None,
-                        json.dumps(error, ensure_ascii=False) if error else None, now(), job_id))
+    def finish(self, job_id, *, claim_token, result=None, error=None):
+        with self.state() as data:
+            row = data["jobs"].get(job_id)
+            if not row or row["status"] != "PROCESSING" or row["claim_token"] != claim_token:
+                raise ServiceError("JOB_LEASE_LOST", "Job không còn thuộc lượt xử lý này.", 409)
+            row.update(status="FAILED" if error else "COMPLETED", result=json.dumps(result, allow_nan=False) if result is not None else None,
+                       error=json.dumps(error) if error else None, updated_at=now(), claim_token=None)
 
-    def transition(self, job_id: str, action: str, max_queue: int, max_attempts: int) -> dict:
-        """Cancel chỉ queued; retry có giới hạn, không tự lặp ảnh sai/chất lượng lỗi."""
-        with self.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+    def transition(self, job_id, action, max_queue, max_attempts):
+        with self.state() as data:
+            row = data["jobs"].get(job_id)
             if not row:
                 raise ServiceError("JOB_NOT_FOUND", "Không tìm thấy công việc.", 404)
             if action == "cancel":
                 if row["status"] == "CANCELLED":
-                    return dict(row)
+                    return row
                 if row["status"] != "QUEUED":
-                    raise ServiceError("JOB_NOT_CANCELLABLE", "Chỉ hủy được job đang chờ; không ngắt CUDA giữa chừng.", 409)
+                    raise ServiceError("JOB_NOT_CANCELLABLE", "Chỉ hủy được job đang chờ.", 409)
                 status = "CANCELLED"
-            else:
-                error = json.loads(row["error"] or "{}")
-                if row["status"] != "FAILED" or not error.get("retryable") or row["attempts"] >= max_attempts:
-                    raise ServiceError("JOB_NOT_RETRYABLE", "Job không cho phép thử lại hoặc đã hết lượt.", 409)
-                if db.execute("SELECT count(*) FROM jobs WHERE status IN ('QUEUED','PROCESSING')").fetchone()[0] >= max_queue:
+            elif action == "retry":
+                if row["status"] != "FAILED" or not json.loads(row["error"] or "{}").get("retryable") or row["attempts"] >= max_attempts:
+                    raise ServiceError("JOB_NOT_RETRYABLE", "Job không cho phép thử lại.", 409)
+                if sum(r["status"] in {"QUEUED", "PROCESSING"} for r in data["jobs"].values()) >= max_queue:
                     raise ServiceError("QUEUE_FULL", "Hàng đợi đã đầy.", 429, retryable=True)
                 status = "QUEUED"
-            db.execute("UPDATE jobs SET status=?,result=NULL,error=NULL,updated_at=? WHERE id=?", (status, now(), job_id))
-        return self.job(job_id)
+            else:
+                raise ServiceError("ACTION_INVALID", "Thao tác không hợp lệ.")
+            row.update(status=status, result=None, error=None, updated_at=now(), claim_token=None)
+        return row
+
+    def heartbeat(self, timestamp=None, mode=None, *, write=False):
+        with self.state() as data:
+            if write:
+                data["heartbeat"] = {"heartbeat": timestamp, "mode": mode}
+            return data["heartbeat"]
+
+    def recover(self):
+        with self.state() as data:
+            for row in data["jobs"].values():
+                if row["status"] == "PROCESSING":
+                    row.update(status="FAILED", claim_token=None, updated_at=now(), error=json.dumps({
+                        "errorCode": "WORKER_INTERRUPTED", "message": "Worker đã dừng; có thể retry.", "retryable": True}))

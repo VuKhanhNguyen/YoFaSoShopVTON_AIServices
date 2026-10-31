@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "YoFaSoShop Internal AI API",
-    "description": "API AI nội bộ. Mock luôn đánh dấu simulated; không chứa nghiệp vụ đơn hàng/điểm thẩm mỹ.",
+    "description": "API AI Services cho VTON, không chứa nghiệp vụ đơn hàng/điểm thẩm mỹ.",
     "version": "1.0.0"
   },
   "paths": {
@@ -1250,7 +1250,7 @@
           "Jobs"
         ],
         "summary": "Analyze Product",
-        "description": "Enqueue phân tích catalog, không tự ghi MySQL hay công bố sản phẩm.",
+        "description": "Enqueue vào manifest AI; không sửa bảng catalog hay tự công bố sản phẩm.",
         "operationId": "analyze_product_internal_v1_products_analyze_post",
         "requestBody": {
           "content": {

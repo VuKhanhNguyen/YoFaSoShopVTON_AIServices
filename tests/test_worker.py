@@ -34,7 +34,7 @@ def test_real_watchdog_terminates_child(settings):
 def test_worker_restart_recovery(settings, client, tryon_payload):
     """Job active sau crash phải FAILED/RETRYABLE thay vì treo PROCESSING mãi."""
     row = client.post("/internal/v1/try-on/jobs", json=tryon_payload).json()
-    store = Store(settings.runtime_dir)
+    store = Store(settings)
     store.claim()
     worker = Worker(settings)
     thread = threading.Thread(target=worker.serve)
@@ -76,8 +76,9 @@ def test_retention(settings, client, upload, tryon_payload):
     """Chỉ terminal job và asset hết hạn được xóa; ảnh input job queued được giữ."""
     unused = upload()["assetId"]
     job = client.post("/internal/v1/try-on/jobs", json=tryon_payload).json()
-    with Store(settings.runtime_dir).connection() as db:
-        db.execute("UPDATE assets SET created_at='2000-01-01T00:00:00+00:00'")
+    with Store(settings).state() as state:
+        for row in state["assets"].values():
+            row["created_at"] = "2000-01-01T00:00:00+00:00"
     preview = cleanup(settings, apply=False)
     assert preview["unreferencedExpiredAssets"] == 1
     assert client.get(f"/internal/v1/assets/{unused}").status_code == 200
@@ -85,8 +86,9 @@ def test_retention(settings, client, upload, tryon_payload):
     assert client.get(f"/internal/v1/assets/{unused}").status_code == 404
     assert client.get(f"/internal/v1/assets/{tryon_payload['personAssetId']}").status_code == 200
     client.post(f"/internal/v1/jobs/{job['jobId']}/cancel")
-    with Store(settings.runtime_dir).connection() as db:
-        db.execute("UPDATE jobs SET updated_at='2000-01-01T00:00:00+00:00'")
+    with Store(settings).state() as state:
+        for row in state["jobs"].values():
+            row["updated_at"] = "2000-01-01T00:00:00+00:00"
     cleanup(settings, apply=True)
     assert client.get(f"/internal/v1/jobs/{job['jobId']}").status_code == 404
 

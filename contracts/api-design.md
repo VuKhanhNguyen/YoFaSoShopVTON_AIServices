@@ -1,5 +1,7 @@
 # Hợp đồng AI nội bộ v1 — 25/10/2026
 
+> **Cập nhật 30/10/2026:** AI runtime đã chuyển sang MySQL, thêm API địa chỉ JSON trong RAM và sửa role mapping theo tên. Làm theo [hướng dẫn migration, địa chỉ và Postman](../../YoFaSoShop_Docs/extra-info/migrationAndLocationGuide.md) trước khi chạy. Source mới chưa được nghiệm thu bằng build/HTTP/MySQL/GPU; các báo cáo PASS trước đây là kết quả baseline cũ.
+
 Thiết kế trước khi hiện thực; OpenAPI được xuất vào `contracts/openapi.json`
 và đối chiếu bằng test để ngăn thay đổi hợp đồng ngoài ý muốn.
 
@@ -19,12 +21,12 @@ và đối chiếu bằng test để ngăn thay đổi hợp đồng ngoài ý m
 - `GET /jobs`: limit/offset/status; `GET /jobs/{jobId}`; `POST .../cancel`;
   `POST .../retry` chỉ job lỗi cho phép retry; `GET /try-on/jobs/{sessionId}`.
 - `GET /capabilities`, `/models`, `/config-check`; `/health/live`, `/health/ready`.
-- POST job dùng ID nghiệp vụ để chống lặp (atomic SQLite transaction): cùng ID
+- POST job dùng ID nghiệp vụ để chống lặp (atomic MySQL transaction): cùng ID
   và payload trả job cũ; payload khác 409. Job queued trước khi trả 202.
 - Trạng thái QUEUED/PROCESSING/COMPLETED/FAILED/CANCELLED; mapping MySQL do BE quản lý.
 - Lỗi chung: errorCode/message/details/correlationId/retryable, status HTTP đúng.
 - Rate limit có Limit/Remaining/Reset và Retry-After; riêng giới hạn queue.
-- SQLite bền vững + worker một process là cấu hình đầu tiên, dùng chung ổ máy AI.
+- MySQL bền vững + worker một process là cấu hình đầu tiên; API/worker dùng chung runtime ảnh.
   Claim atomic và khóa worker bảo đảm một job GPU. Không có task in-memory giả bền.
 - API và worker là hai tiến trình; worker có thể chạy embedded chỉ với mock để test.
 - Chế độ mock chỉ development/test, mọi output có simulated=true và cảnh báo,

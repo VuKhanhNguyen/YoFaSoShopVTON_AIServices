@@ -1,5 +1,6 @@
 {
   "info": {
+    "description": "File-manifest runtime on a persistent single-host volume; no SQL/SQLite. Mock is simulated.",
     "name": "YoFaSoShop AI v1",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
@@ -74,7 +75,8 @@
           "script": {
             "type": "text/javascript",
             "exec": [
-              "pm.test('Không có lỗi server ngoài dự kiến', function () { pm.expect(pm.response.code).to.be.below(500); });"
+              "pm.test('Không có lỗi server ngoài dự kiến', function () { pm.expect(pm.response.code).to.be.below(500); });",
+              "if(pm.response.code===200)pm.test('Queue uses manifest',()=>pm.expect(pm.response.json().queueBackend).to.equal('file-manifest'));"
             ]
           }
         }
@@ -102,7 +104,8 @@
           "script": {
             "type": "text/javascript",
             "exec": [
-              "pm.test('Không có lỗi server ngoài dự kiến', function () { pm.expect(pm.response.code).to.be.below(500); });"
+              "pm.test('Không có lỗi server ngoài dự kiến', function () { pm.expect(pm.response.code).to.be.below(500); });",
+              "if(pm.response.code===200)pm.test('Queue uses manifest',()=>pm.expect(pm.response.json().queueBackend).to.equal('file-manifest'));"
             ]
           }
         }
@@ -367,7 +370,7 @@
         "url": "{{aiBaseUrl}}/internal/v1/products/analyze",
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"analysisId\": \"{{analysisId}}\",\n  \"productId\": \"SP001\",\n  \"productAssetIds\": [\n    \"{{garmentAssetId}}\"\n  ],\n  \"referenceAssetIds\": [],\n  \"categoryOverride\": \"upper_body\"\n}",
+          "raw": "{\n  \"analysisId\": \"{{analysisId}}\",\n  \"productId\": \"SP00000001\",\n  \"productAssetIds\": [\n    \"{{garmentAssetId}}\"\n  ],\n  \"referenceAssetIds\": [],\n  \"categoryOverride\": \"upper_body\"\n}",
           "options": {
             "raw": {
               "language": "json"
@@ -409,7 +412,7 @@
         "url": "{{aiBaseUrl}}/internal/v1/try-on/jobs",
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"sessionId\": \"{{sessionId}}\",\n  \"productId\": \"SP001\",\n  \"variantId\": \"BT001\",\n  \"personAssetId\": \"{{personAssetId}}\",\n  \"garmentAssetId\": \"{{garmentAssetId}}\",\n  \"vtonCategory\": \"upper_body\",\n  \"garmentSubtype\": \"sling\",\n  \"garmentLength\": \"UNKNOWN\",\n  \"seed\": 42,\n  \"steps\": 20,\n  \"samples\": 1\n}",
+          "raw": "{\n  \"sessionId\": \"{{sessionId}}\",\n  \"productId\": \"SP00000001\",\n  \"variantId\": \"BT00000001\",\n  \"personAssetId\": \"{{personAssetId}}\",\n  \"garmentAssetId\": \"{{garmentAssetId}}\",\n  \"vtonCategory\": \"upper_body\",\n  \"garmentSubtype\": \"sling\",\n  \"garmentLength\": \"UNKNOWN\",\n  \"seed\": 42,\n  \"steps\": 20,\n  \"samples\": 1\n}",
           "options": {
             "raw": {
               "language": "json"
@@ -444,7 +447,7 @@
             "value": "{{aiApiKey}}"
           }
         ],
-        "url": "{{aiBaseUrl}}/internal/v1/jobs"
+        "url": "{{aiBaseUrl}}/internal/v1/jobs?status=QUEUED&limit=20&offset=0"
       },
       "event": [
         {

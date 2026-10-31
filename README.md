@@ -1,5 +1,7 @@
 # YoFaSoShop · AI Service
 
+> **30/10/2026:** AI không kết nối MySQL/SQLite, không tạo bảng. Queue/asset/heartbeat dùng JSON manifest trong RUNTIME_DIR, API và một worker chia sẻ volume trên một host. Backend giữ đúng 19 bảng nghiệp vụ. Xem [setupGuide](../YoFaSoShop_Docs/extra-info/setupGuide.md).
+
 **FastAPI cho phân tích ảnh sản phẩm, kiểm tra ảnh người và thử đồ ảo bằng OOTDiffusion.**
 
 AI Service xử lý ảnh và các tác vụ AI. Spring Boot sẽ phụ trách tài khoản, sản phẩm,
@@ -23,10 +25,10 @@ giỏ hàng, đơn hàng, tồn kho, điểm thẩm mỹ và gợi ý sản ph�
 
 ## 1. Chuẩn bị và chọn cách chạy
 
-| Mục đích | Chế độ | Cần GPU/model? |
-|---|---|---|
-| Xem Swagger, kiểm tra upload, xác thực, job/status và lỗi đầu vào | `mock` | Không |
-| Phân tích ảnh bằng detector, sinh ảnh thử đồ và hậu kiểm thật | `real` | Cần weights; VTON cần GPU NVIDIA/CUDA |
+| Mục đích                                                               | Chế độ | Cần GPU/model?                         |
+| ------------------------------------------------------------------------- | --------- | --------------------------------------- |
+| Xem Swagger, kiểm tra upload, xác thực, job/status và lỗi đầu vào | `mock`  | Không                                  |
+| Phân tích ảnh bằng detector, sinh ảnh thử đồ và hậu kiểm thật | `real`  | Cần weights; VTON cần GPU NVIDIA/CUDA |
 
 **Dùng Python 3.10** theo môi trường dự án. Kiểm tra bằng `python --version`.
 Các lệnh bên dưới được chạy từ thư mục `YoFaSoShop_AIService` trong repo đã clone.
@@ -127,29 +129,21 @@ request cụ thể nằm trong [apiTestingGuide.md](../YoFaSoShop_Docs/extra-inf
 
 ## 3. Tải code và checkpoint OOTDiffusion
 
-### 3.1. Có cần nhận sẵn thư mục OOTDiffusion khi clone không?
+### 3.1. Phân biệt các script
 
-**Không bắt buộc.** Nếu thư mục không được đưa lên GitHub, dùng script để tải lại.
-Khi chạy thật, code và checkpoint phải nằm trên **máy chạy worker GPU**.
-Tải trên laptop không tự chuyển chúng lên máy thuê; Remote-SSH không tự đồng bộ file.
-
-Trong lần kiểm tra local trước đây, thư mục OOTDiffusion khoảng **14,28 GiB**.
-Dung lượng thực tế phụ thuộc revision. Script yêu cầu ít nhất **20 GiB trống** trước
-khi tải; cần dự trù thêm chỗ cho Python, weights khác, Docker image và kết quả.
-
-### 3.2. Phân biệt các script
-
-| Script trong `scripts/` | Công việc |
-|---|---|
-| `download_ootdiffusion.py` | Tải bộ code chạy, preprocessing và checkpoint từ Hugging Face Space |
-| `download_ootdiffusion.ps1` | Gọi script Python trên Windows, chuyển tiếp các tham số |
-| `download_ootdiffusion.sh` | Gọi script Python trên Linux/Bash, chuyển tiếp các tham số |
-| `download_assets.py` | Chỉ tải checkpoint OOTDiffusion và weight DeepFashion2 theo `.env`; yêu cầu code OOTDiffusion đã có |
+| Script trong `scripts/`     | Công việc                                                                                                   |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `download_ootdiffusion.py`  | Tải bộ code chạy, preprocessing và checkpoint từ Hugging Face Space                                      |
+| `download_ootdiffusion.ps1` | Gọi script Python trên Windows, chuyển tiếp các tham số                                                 |
+| `download_ootdiffusion.sh`  | Gọi script Python trên Linux/Bash, chuyển tiếp các tham số                                              |
+| `download_assets.py`        | Chỉ tải checkpoint OOTDiffusion và weight DeepFashion2 theo `.env`; yêu cầu code OOTDiffusion đã có |
 
 Bản `.ps1`/`.sh` gọi `python` của terminal hiện tại. Nếu có nhiều Python, dùng
 trực tiếp Python trong venv như bên dưới để tránh chạy nhầm môi trường.
 
-### 3.3. Tải trên Windows
+Script yêu cầu ít nhất **20 GiB trống** trước khi tải; cần dự trù thêm chỗ cho Python, weights khác, Docker image và kết quả.
+
+### 3.2. Tải trên Windows
 
 Sau khi tạo venv ở mục 2:
 
@@ -171,7 +165,7 @@ Nếu đã kích hoạt đúng venv và `python` trỏ tới venv đó, có th�
 .\scripts\download_ootdiffusion.ps1
 ```
 
-### 3.4. Tải trên máy GPU Linux
+### 3.3. Tải trên máy GPU Linux
 
 Sau khi tạo và kích hoạt venv GPU ở mục 5.1:
 
@@ -184,7 +178,7 @@ python scripts/download_ootdiffusion.py
 Hoặc dùng `bash scripts/download_ootdiffusion.sh`. Khi tải gián đoạn, chạy lại
 cùng lệnh để công cụ tận dụng dữ liệu/cache đã tải.
 
-### 3.5. Kết quả tải và cấu hình nâng cao
+### 3.4. Kết quả tải và cấu hình nâng cao
 
 Nguồn mặc định: [Hugging Face Space · levihsu/OOTDiffusion](https://huggingface.co/spaces/levihsu/OOTDiffusion).
 Script chọn các thành phần sau, không sao chép mọi file trong Space:
@@ -249,10 +243,10 @@ Tải từ nguồn không phục hồi các chỉnh sửa chỉ có trên máy b
 
 **Tải OOTDiffusion không đồng thời tải các weight riêng trong `weights/`.**
 
-| File cần có | Vai trò |
-|---|---|
-| `weights/deepfashion2_yolov8s-seg.pt` | Phát hiện và phân vùng trang phục |
-| `weights/yolo26s-pose.pt` | Phát hiện người và các điểm cơ thể theo lựa chọn hiện tại |
+| File cần có                           | Vai trò                                                                |
+| --------------------------------------- | ----------------------------------------------------------------------- |
+| `weights/deepfashion2_yolov8s-seg.pt` | Phát hiện và phân vùng trang phục                                 |
+| `weights/yolo26s-pose.pt`             | Phát hiện người và các điểm cơ thể theo lựa chọn hiện tại |
 
 Nếu chủ repo đã lưu chúng bằng Git LFS, cài Git LFS rồi chạy trong repo đã clone:
 
@@ -263,8 +257,7 @@ git lfs ls-files
 ```
 
 Lệnh này chỉ tải file LFS thực sự đã được đưa lên. Nếu không có trên LFS, lấy từ
-bản phân phối của chủ dự án rồi đặt đúng đường dẫn. Không chỉ đổi tên một model khác
-thành `yolo26s-pose.pt`.
+bản phân phối của chủ dự án rồi đặt đúng đường dẫn.
 
 Khi code OOTDiffusion đã có và đã cài môi trường GPU, có thể tải checkpoint và
 DeepFashion2 theo nguồn/revision trong `.env` bằng:
@@ -274,8 +267,7 @@ python scripts/download_assets.py
 ```
 
 Script này **không tải YOLO26 pose**. Hai weight ResNet50 chưa được pipeline API
-hiện tại nạp. Toàn bộ bộ ảnh `data/garments_categories/` cũng không bắt buộc để
-khởi động API hoặc xử lý ảnh upload.
+hiện tại nạp.
 
 ## 5. Chạy model thật trên máy GPU
 
@@ -312,26 +304,7 @@ python scripts/init_env.py
 Phải thấy `CUDA available: True` trước khi chạy VTON thật. Dùng venv riêng giúp tránh
 trộn với PyTorch có sẵn trong template. Tải model/weights theo mục 3–4 nếu chưa có.
 
-### 5.2. Sửa `.env`
-
-```dotenv
-APP_ENV=development
-AI_MODE=real
-EMBEDDED_WORKER=false
-EXPOSE_DOCS=true
-VISION_DEVICE=cpu
-OOTD_ROOT=./api/models/ootdiffusion
-DEEPFASHION_WEIGHTS=./weights/deepfashion2_yolov8s-seg.pt
-POSE_WEIGHTS=./weights/yolo26s-pose.pt
-RUNTIME_DIR=./data/runtime
-HF_HOME=./.cache/huggingface
-```
-
-Giữ `AI_INTERNAL_API_KEY` đã tạo. `VISION_DEVICE=cpu` dành cho detector;
-OOTDiffusion vẫn dùng GPU CUDA. Đường dẫn tương đối được ứng dụng giải từ thư mục
-AI Service. Khi đổi `.env`, khởi động lại cả API và worker.
-
-### 5.3. Chạy API và worker ở hai terminal
+### 5.2. Chạy API và worker ở hai terminal
 
 Cả hai terminal đều đứng trong `YoFaSoShop_AIService`.
 
@@ -349,9 +322,9 @@ source .venv-gpu/bin/activate
 python -m workers.runner
 ```
 
-API và worker phải đọc cùng `.env` và dùng chung `RUNTIME_DIR`. Queue dùng SQLite
-trên **cùng máy, cùng ổ runtime**; không dùng file này qua NFS hoặc tách sang hai
-máy có hai bản database khác nhau. Redis/Celery chưa phải dependency.
+API và worker phải đọc cùng `.env` và dùng chung `RUNTIME_DIR`. Queue dùng JSON manifest nguyên tử, không cần database hay migration.
+Ảnh vẫn cần **cùng volume runtime**; không đặt API và worker lên hai host chia sẻ NFS.
+Worker giữ khóa OS trên volume, một worker cho runtime. Redis/Celery chưa phải dependency.
 
 ```text
 Upload ảnh → Nhận assetId → Tạo job → Nhận 202 + jobId
@@ -367,7 +340,7 @@ Worker xử lý lần lượt, cache model trong tiến trình con và dừng ti
 quá thời gian. Routing: `upper_body` → OOTDiffusion HD;
 `lower_body` / `dress` → OOTDiffusion DC. Không dùng IDM-VTON.
 
-### 5.4. Truy cập từ laptop
+### 5.3. Truy cập từ laptop
 
 Dùng SSH tunnel để mở API máy thuê trên laptop trong khi server vẫn bind
 `127.0.0.1`. Xem [setupGuide.md](../YoFaSoShop_Docs/extra-info/setupGuide.md)
@@ -413,13 +386,13 @@ chưa xác nhận build image hoặc inference GPU thành công.
 
 ## 7. Kiểm thử API
 
-| Đường dẫn | Công dụng |
-|---|---|
-| `GET /health/live` | Kiểm tra tiến trình API đang sống |
-| `GET /health/ready` | Kiểm tra điều kiện cơ bản, heartbeat worker và file cần thiết |
-| `GET /internal/v1/config-check` | Kiểm tra cấu hình ứng dụng |
-| `GET /internal/v1/models` | Kiểm tra sự hiện diện của các file model được khai báo |
-| `/docs` | Thử endpoint qua Swagger |
+| Đường dẫn                     | Công dụng                                                            |
+| --------------------------------- | ---------------------------------------------------------------------- |
+| `GET /health/live`              | Kiểm tra tiến trình API đang sống                                 |
+| `GET /health/ready`             | Kiểm tra điều kiện cơ bản, heartbeat worker và file cần thiết |
+| `GET /internal/v1/config-check` | Kiểm tra cấu hình ứng dụng                                        |
+| `GET /internal/v1/models`       | Kiểm tra sự hiện diện của các file model được khai báo       |
+| `/docs`                         | Thử endpoint qua Swagger                                              |
 
 **Health ready hoặc file hiện diện chưa chứng minh inference chạy thành công.**
 Để nghiệm thu model thật, upload ảnh, tạo job, theo dõi đến trạng thái kết thúc và
@@ -487,22 +460,19 @@ Thêm ignore cũng không tự bỏ theo dõi file đã commit trước đó.
 
 ## 9. Xử lý lỗi thường gặp
 
-| Hiện tượng | Kiểm tra / xử lý |
-|---|---|
-| Thiếu `fastapi` hoặc `huggingface_hub` | Dùng cùng Python của venv để cài và chạy |
-| Không tạo được venv | Kiểm tra Python 3.10 và thành phần `venv` của hệ điều hành |
-| Đã init nhưng ứng dụng vẫn chạy real | `.env` cũ được giữ nguyên; sửa `AI_MODE`/`EMBEDDED_WORKER` rồi khởi động lại |
-| API trả `401` | Nhập đúng `AI_INTERNAL_API_KEY` của server đang chạy |
-| Cổng `8000` đang được dùng | Dừng server cũ hoặc đổi `--port` và URL test tương ứng |
-| Downloader báo dưới 20 GiB trống | Giải phóng ổ hoặc dùng `--local-dir`; `--force-low-disk` chỉ bỏ kiểm tra, không tạo dung lượng |
-| Tải gián đoạn | Chạy lại cùng nguồn/revision/thư mục, kiểm tra mạng và dung lượng |
-| `download_assets.py` báo thiếu code | Tải bằng `download_ootdiffusion.py` trước; kiểm tra `OOTD_ROOT` |
-| `MODEL_NOT_READY` | Kiểm tra `.env`, mount Docker và `checkpoints/ootd/model_index.json` |
-| `CUDA available: False` / `GPU_UNAVAILABLE` | Kiểm tra `nvidia-smi`, PyTorch, driver và quyền cấp GPU cho container |
-| Không nạp được YOLO26 | Kiểm tra file thật thay vì con trỏ LFS và độ tương thích phiên bản Ultralytics; cần test model thực tế |
-| Job mãi `QUEUED` | Kiểm tra worker, log và việc dùng chung `.env`/`RUNTIME_DIR` |
-| Hết VRAM / inference thất bại | Đọc mã lỗi/log, kiểm tra GPU và tham số; hệ thống không tự fallback mock để báo thành công |
-| Docker không kết nối được daemon | Khởi động Docker Engine/Desktop hoặc dùng Python trực tiếp trên template container |
-
-Hướng dẫn chi tiết về thuê GPU, SSH, volumes và phần Backend/Frontend mở rộng:
-[setupGuide.md](../YoFaSoShop_Docs/extra-info/setupGuide.md).
+| Hiện tượng                                   | Kiểm tra / xử lý                                                                                                   |
+| ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Thiếu `fastapi` hoặc `huggingface_hub`    | Dùng cùng Python của venv để cài và chạy                                                                      |
+| Không tạo được venv                        | Kiểm tra Python 3.10 và thành phần `venv` của hệ điều hành                                                 |
+| Đã init nhưng ứng dụng vẫn chạy real     | `.env` cũ được giữ nguyên; sửa `AI_MODE`/`EMBEDDED_WORKER` rồi khởi động lại                        |
+| API trả `401`                                | Nhập đúng `AI_INTERNAL_API_KEY` của server đang chạy                                                          |
+| Cổng `8000` đang được dùng              | Dừng server cũ hoặc đổi `--port` và URL test tương ứng                                                     |
+| Downloader báo dưới 20 GiB trống            | Giải phóng ổ hoặc dùng `--local-dir`; `--force-low-disk` chỉ bỏ kiểm tra, không tạo dung lượng        |
+| Tải gián đoạn                               | Chạy lại cùng nguồn/revision/thư mục, kiểm tra mạng và dung lượng                                          |
+| `download_assets.py` báo thiếu code         | Tải bằng `download_ootdiffusion.py` trước; kiểm tra `OOTD_ROOT`                                              |
+| `MODEL_NOT_READY`                             | Kiểm tra `.env`, mount Docker và `checkpoints/ootd/model_index.json`                                            |
+| `CUDA available: False` / `GPU_UNAVAILABLE` | Kiểm tra `nvidia-smi`, PyTorch, driver và quyền cấp GPU cho container                                           |
+| Không nạp được YOLO26                      | Kiểm tra file thật thay vì con trỏ LFS và độ tương thích phiên bản Ultralytics; cần test model thực tế |
+| Job mãi `QUEUED`                             | Kiểm tra worker, log và việc dùng chung `.env`/`RUNTIME_DIR`                                                  |
+| Hết VRAM / inference thất bại                | Đọc mã lỗi/log, kiểm tra GPU và tham số; hệ thống không tự fallback mock để báo thành công            |
+| Docker không kết nối được daemon          | Khởi động Docker Engine/Desktop hoặc dùng Python trực tiếp trên template container                            |

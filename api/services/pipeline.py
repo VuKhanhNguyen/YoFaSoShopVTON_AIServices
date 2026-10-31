@@ -9,7 +9,7 @@ from PIL import Image, ImageDraw
 from api.core.errors import ServiceError
 from api.core.store import Store
 from api.services.assets import Assets
-from api.services.routing import category_for, route
+from api.services.routing import category_for, normalize_label, route
 from api.services.vision import Vision, VISION_LOCK
 
 
@@ -18,7 +18,7 @@ class Pipeline:
     def __init__(self, settings):
         """Chuẩn bị storage/detector adapter, chưa nạp diffusion cho tới job thật."""
         self.settings = settings
-        self.store = Store(settings.runtime_dir)
+        self.store = Store(settings)
         self.assets = Assets(settings, self.store)
         self.vision = Vision(settings)
         self.ootd = self.ootd_type = self.openpose = self.parsing = None
@@ -178,7 +178,7 @@ class Pipeline:
         with VISION_LOCK:
             self.vision.load()
             detection, ref_mask = self.vision.garment(garment.convert("RGB"), payload["vtonCategory"])
-            target = payload.get("garmentSubtype") or detection["label"]
+            target = normalize_label(payload.get("garmentSubtype") or detection["label"])
             work = self.settings.runtime_dir / "jobs" / job_id
             work.mkdir(parents=True, exist_ok=True)
             source_path = work / "source.png"
@@ -203,7 +203,7 @@ class Pipeline:
             with torch.inference_mode():
                 outputs = self.ootd(model_type=decision["modelType"], category={"upper_body": "upperbody", "lower_body": "lowerbody", "dress": "dress"}[payload["vtonCategory"]],
                                     image_garm=garment_input, image_vton=Image.composite(gray, prepared, mask), mask=mask, image_ori=prepared,
-                                    num_samples=payload["samples"], num_steps=payload["steps"], image_scale=2.0, seed=payload["seed"])
+                                    num_samples=payload["samples"], num_steps=payload["steps"], image_scale=self.settings.ootd_image_scale, seed=payload["seed"])
             candidates = []
             reports = []
             for index, image in enumerate(outputs):
@@ -222,7 +222,7 @@ class Pipeline:
                 color = q.garment_color_similarity(garment.convert("RGB"), ref_mask.astype(np.uint8) * 255, image, candidate_mask)
                 match, _ = q.candidate_match_quality(candidate_detection["label"], target, payload["vtonCategory"])
                 passed = gate_candidate(payload["vtonCategory"], target, outside, body, limb, match)
-                score = .3 * color + .25 * outside + .2 * body + .2 * fit + .05 * candidate_detection["confidence"]
+                score = candidate_score(payload["vtonCategory"], color, outside, body, limb, fit, candidate_detection["confidence"])
                 reports.append({"index": index, "passed": passed, "matchLevel": match, "outside": outside, "body": body, "limb": limb, "fit": fit, "color": color, "score": score})
                 if passed:
                     composite = q.composite_preserving_source(image, prepared, edit, protected)
@@ -244,6 +244,15 @@ def gate_candidate(category, subtype, outside, body, limb, match):
         return False
     if category == "dress" and body < .30:
         return False
-    if not subtype.startswith("long_sleeved") and category in {"upper_body", "dress"}:
+    if not normalize_label(subtype).startswith("long_sleeved") and category in {"upper_body", "dress"}:
         return limb >= (.65 if category == "upper_body" else .75)
     return True
+
+
+def candidate_score(category, color, outside, body, limb, fit, confidence):
+    """Ranking chất lượng ảnh theo routingForTryon.md, khác điểm thẩm mỹ 40/40/20."""
+    if category == "upper_body":
+        return .25 * color + .35 * limb + .25 * fit + .15 * confidence
+    if category == "lower_body":
+        return .20 * color + .25 * outside + .25 * body + .25 * fit + .05 * confidence
+    return .30 * color + .25 * outside + .20 * body + .20 * fit + .05 * confidence

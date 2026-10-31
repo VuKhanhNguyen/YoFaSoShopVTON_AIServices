@@ -60,7 +60,7 @@ class Assets:
         return self.save(image, role)
 
     def save(self, image, role: str, simulated: bool = False, job_id: str | None = None) -> dict:
-        """Ghi PNG không EXIF, atomic replace; giữ output asset với job trong DB."""
+        """Ghi PNG không EXIF, atomic replace; giữ output asset với job trong manifest."""
         asset_id = uuid4().hex
         buffer = io.BytesIO()
         clean = image.copy()
@@ -72,10 +72,9 @@ class Assets:
         temporary.write_bytes(data)
         temporary.replace(path)
         try:
-            with self.store.connection() as db:
-                db.execute("INSERT INTO assets VALUES(?,?,?,?,?,?,?,?)", (asset_id, role, image.width, image.height, len(data), hashlib.sha256(data).hexdigest(), now(), int(simulated)))
-                if job_id:
-                    db.execute("INSERT INTO job_assets VALUES(?,?)", (job_id, asset_id))
+            self.store.register_asset(dict(id=asset_id, role=role, width=image.width, height=image.height,
+                                           bytes=len(data), sha256=hashlib.sha256(data).hexdigest(),
+                                           created_at=now(), simulated=int(simulated)), job_id)
         except BaseException:
             path.unlink(missing_ok=True)
             raise
@@ -83,11 +82,6 @@ class Assets:
 
     def delete(self, asset_id: str):
         """Không xóa ảnh được input/output job tham chiếu, kể cả job đã hoàn tất."""
-        with self.store.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
-            if not db.execute("SELECT 1 FROM assets WHERE id=?", (asset_id,)).fetchone():
-                raise ServiceError("ASSET_NOT_FOUND", "Không tìm thấy ảnh.", 404)
-            if db.execute("SELECT 1 FROM job_assets WHERE asset_id=?", (asset_id,)).fetchone():
-                raise ServiceError("ASSET_IN_USE", "Ảnh đang thuộc một job; dùng retention sau khi hết hạn.", 409)
-            db.execute("DELETE FROM assets WHERE id=?", (asset_id,))
-            (self.root / f"{asset_id}.png").unlink(missing_ok=True)
+        self.store.asset(asset_id)
+        self.store.delete_asset(asset_id)
+        (self.root / f"{asset_id}.png").unlink(missing_ok=True)

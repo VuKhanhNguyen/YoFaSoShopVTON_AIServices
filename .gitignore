@@ -66,3 +66,5 @@ data/test-fixtures/
 *.log
 *.sqlite3*
 data/probe/
+reports/
+test-debug/
