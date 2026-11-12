@@ -1,6 +1,6 @@
 # YoFaSoShop · AI Service
 
-> **30/10/2026:** AI không kết nối MySQL/SQLite, không tạo bảng. Queue/asset/heartbeat dùng JSON manifest trong RUNTIME_DIR, API và một worker chia sẻ volume trên một host. Backend giữ đúng 19 bảng nghiệp vụ. Xem [setupGuide](../YoFaSoShop_Docs/extra-info/setupGuide.md).
+> **30/10/2026:** AI không kết nối MySQL/SQLite, không tạo bảng. Queue/asset/heartbeat dùng JSON manifest trong RUNTIME_DIR, API và một worker chia sẻ volume trên một host. Backend giữ đúng 20 bảng nghiệp vụ. Xem [setupGuide](../YoFaSoShop_Docs/extra-info/setupGuide.md).
 
 **FastAPI cho phân tích ảnh sản phẩm, kiểm tra ảnh người và thử đồ ảo bằng OOTDiffusion.**
 

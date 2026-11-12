@@ -10,10 +10,13 @@ from api.core.config import Settings
 from api.core.store import Store
 
 
+TZ_VN = timezone(timedelta(hours=7))
+
+
 def cleanup(settings, apply=False):
     """Xóa terminal job quá hạn, rồi asset quá hạn không còn được job tham chiếu."""
     store = Store(settings)
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=settings.retention_hours)).isoformat()
+    cutoff = (datetime.now(TZ_VN) - timedelta(hours=settings.retention_hours)).isoformat()
     with store.state() as state:
         jobs = [r for r in state["jobs"].values() if r["status"] in {"COMPLETED","FAILED","CANCELLED"} and r["updated_at"] < cutoff]
         removed = {r["id"] for r in jobs}

@@ -9,14 +9,16 @@ import os
 import threading
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from uuid import uuid4
 
 from api.core.errors import ServiceError
 
+TZ_VN = timezone(timedelta(hours=7))
+
 
 def now():
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(TZ_VN).isoformat()
 
 
 _locks = {}
