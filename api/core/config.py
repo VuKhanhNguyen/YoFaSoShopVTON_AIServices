@@ -1,6 +1,10 @@
 """Đọc .env một lần tại biên ứng dụng; mọi đường dẫn triển khai đổi ở đây."""
+import os
 from pathlib import Path
 from typing import Literal
+
+# Ràng buộc chống phân mảnh bộ nhớ VRAM 24GB theo VLM_and_SAM.md
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -19,6 +23,10 @@ class Settings(BaseSettings):
     ootd_root: Path = ROOT / "api/models/ootdiffusion"
     deepfashion_weights: Path = ROOT / "weights/deepfashion2_yolov8s-seg.pt"
     pose_weights: Path = ROOT / "weights/yolo26s-pose.pt"
+    sam2_weights: Path = ROOT / "weights/sam2/sam2_b.pt"
+    vlm_model_dir: Path = ROOT / "api/models/vlm/Qwen2-VL-2B-Instruct"
+    enable_sam2: bool = True
+    enable_vlm: bool = True
     vision_device: str = "cpu"
     hf_home: Path = ROOT / ".cache/huggingface"
     hf_token: SecretStr | None = None
@@ -29,8 +37,8 @@ class Settings(BaseSettings):
     max_job_attempts: int = 2
     max_queue_size: int = 20
     rate_limit_per_minute: int = 120
-    max_upload_bytes: int = 10 * 1024 * 1024
-    max_image_pixels: int = 20_000_000
+    max_upload_bytes: int = 60 * 1024 * 1024
+    max_image_pixels: int = 60_000_000
     min_image_side: int = 128
     max_variants: int = 8
     ootd_image_scale: float = Field(default=1.6, ge=0.5, le=5)
@@ -54,7 +62,7 @@ class Settings(BaseSettings):
                 raise ValueError(f"{field} phải lớn hơn 0")
         if self.worker_poll_seconds <= 0:
             raise ValueError("worker_poll_seconds phải lớn hơn 0")
-        for field in ("runtime_dir", "ootd_root", "deepfashion_weights", "pose_weights", "hf_home"):
+        for field in ("runtime_dir", "ootd_root", "deepfashion_weights", "pose_weights", "hf_home", "sam2_weights", "vlm_model_dir"):
             path = getattr(self, field).expanduser()
             setattr(self, field, (ROOT / path).resolve() if not path.is_absolute() else path.resolve())
         return self

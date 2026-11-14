@@ -350,6 +350,34 @@
       ]
     },
     {
+      "name": "POST /internal/v1/garments/analyze-color",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "X-Correlation-ID",
+            "value": "postman-demo"
+          },
+          {
+            "key": "X-Internal-API-Key",
+            "value": "{{aiApiKey}}"
+          }
+        ],
+        "url": "{{aiBaseUrl}}/internal/v1/garments/analyze-color"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Không có lỗi server ngoài dự kiến', function () { pm.expect(pm.response.code).to.be.below(500); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
       "name": "POST /internal/v1/products/analyze",
       "request": {
         "method": "POST",

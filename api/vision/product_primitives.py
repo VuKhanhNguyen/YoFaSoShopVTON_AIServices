@@ -770,7 +770,8 @@ def _studio_background_cleanup(mask, image, label):
     if raw_retained_ratio < 0.5:
         metadata['background_cleanup_skip_reason'] = 'unsafe_raw_loss'
         return (mask.copy(), metadata)
-    if area_ratio > 2.5:
+    max_allowed_area_ratio = 4.5 if label in DRESS_LABELS else 2.5
+    if area_ratio > max_allowed_area_ratio:
         metadata['background_cleanup_skip_reason'] = 'unsafe_expansion'
         return (mask.copy(), metadata)
     if label in UPPER_LABELS and added_fraction > 0.45:
@@ -1093,6 +1094,42 @@ def extract_base_colors(image, mask, label):
     unique_count = len(np.unique(quantized, axis=0))
     cluster_count = min(5, max(1, unique_count))
     kmeans = KMeans(n_clusters=cluster_count, random_state=42, n_init=10).fit(quantized)
+    counts = np.bincount(kmeans.labels_, minlength=cluster_count)
+    merged = merge_color_clusters(kmeans.cluster_centers_, counts)
+    results = []
+    retained = sum((item['weight'] for item in merged)) or 1.0
+    for item in merged:
+        clipped = np.clip(np.rint(item['rgb']), 0, 255).astype(int)
+        results.append({'name': item['name'], 'hex': f'#{clipped[0]:02X}{clipped[1]:02X}{clipped[2]:02X}', 'share': round(item['weight'] / retained, 3)})
+    return results
+
+def extract_fallback_colors(image):
+    """Trích xuất màu trực tiếp từ ảnh khi chưa/không tìm thấy segmentation mask."""
+    img = image.convert('RGB')
+    if max(img.size) > 384:
+        img = img.copy()
+        img.thumbnail((384, 384), Image.Resampling.BILINEAR)
+    rgb = np.asarray(img)
+    h, w, _ = rgb.shape
+    border_pixels = np.concatenate([rgb[0, :, :], rgb[-1, :, :], rgb[:, 0, :], rgb[:, -1, :]], axis=0)
+    bg_color = np.median(border_pixels, axis=0)
+
+    diff_from_bg = np.linalg.norm(rgb.astype(float) - bg_color.astype(float), axis=2)
+    luminance = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+    valid_mask = (diff_from_bg > 25) & (luminance > 15) & (luminance < 250)
+
+    pixels = rgb[valid_mask]
+    if len(pixels) < 50:
+        pixels = rgb.reshape(-1, 3)
+
+    rng = np.random.default_rng(42)
+    if len(pixels) > 8000:
+        pixels = pixels[rng.choice(len(pixels), 8000, replace=False)]
+
+    quantized = pixels // 8 * 8 + 4
+    unique_count = len(np.unique(quantized, axis=0))
+    cluster_count = min(5, max(1, unique_count))
+    kmeans = KMeans(n_clusters=cluster_count, random_state=42, n_init=5).fit(quantized)
     counts = np.bincount(kmeans.labels_, minlength=cluster_count)
     merged = merge_color_clusters(kmeans.cluster_centers_, counts)
     results = []

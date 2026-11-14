@@ -1,4 +1,5 @@
 """Factory phục vụ runtime và test: không yêu cầu khóa thật lúc import test."""
+import io
 import logging
 import asyncio
 import re
@@ -9,6 +10,7 @@ from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from typing import Literal
 from uuid import uuid4
+from PIL import Image
 
 from fastapi import APIRouter, Depends, FastAPI, File, Form, Query, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
@@ -226,6 +228,80 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def routing_preview(body: RouteRequest):
         """Rule thuần, không tốn GPU; frame nhập tay không thay validation ảnh thật."""
         return route(body.vton_category, body.person_frame, body.garment_subtype, body.garment_length)
+
+    @router.post("/garments/analyze-color", tags=["Vision"])
+    async def analyze_garment_color(
+        file: UploadFile = File(None),
+        asset_id: str | None = Form(None),
+    ):
+        """Nhận diện nhanh màu chủ đạo, bảng màu và phân loại VTON từ ảnh sản phẩm."""
+        if file is not None:
+            try:
+                data = await file.read(settings.max_upload_bytes + 1)
+                if len(data) > settings.max_upload_bytes:
+                    raise ServiceError("UPLOAD_TOO_LARGE", f"File vượt quá {settings.max_upload_bytes} bytes.", 413)
+                image = Image.open(io.BytesIO(data))
+            finally:
+                await file.close()
+        elif asset_id:
+            image = assets.open(asset_id, {"garment"})
+        else:
+            raise ServiceError("INPUT_REQUIRED", "Cần cung cấp file ảnh hoặc asset_id.", 422)
+
+        return vision.analyze_garment_color(image)
+
+    @router.post("/garments/segment-realtime", tags=["Vision"])
+    async def segment_garment_realtime(
+        garment_asset_id: str = Form(None),
+        reference_asset_id: str = Form(None),
+        category: str = Form(None),
+        subtype: str = Form(None),
+        garment_file: UploadFile = File(None),
+        reference_file: UploadFile = File(None),
+    ):
+        """Bóc tách nền và tạo Agnostic Mask realtime bằng YOLOv8s-seg + SAM 2."""
+        image = None
+        if garment_file:
+            try:
+                gdata = await garment_file.read(settings.max_upload_bytes + 1)
+                image = Image.open(io.BytesIO(gdata))
+            finally:
+                await garment_file.close()
+        elif garment_asset_id:
+            image = assets.open(garment_asset_id, {"garment"})
+        else:
+            raise ServiceError("INPUT_REQUIRED", "Cần cung cấp garment_file hoặc garment_asset_id.", 422)
+
+        ref_image = None
+        if reference_file:
+            try:
+                rdata = await reference_file.read(settings.max_upload_bytes + 1)
+                ref_image = Image.open(io.BytesIO(rdata))
+            finally:
+                await reference_file.close()
+        elif reference_asset_id:
+            try:
+                ref_image = assets.open(reference_asset_id, {"reference"})
+            except Exception:
+                ref_image = None
+
+        res = vision.segment_garment_realtime(image, ref_image, category, subtype)
+        simulated = settings.ai_mode == "mock"
+        cutout_asset = assets.save(res["cutout"], "cutout", simulated)
+        mask_asset = assets.save(res["mask"], "mask", simulated)
+
+        return {
+            "cutoutAssetId": cutout_asset["assetId"],
+            "cutoutUrl": cutout_asset["contentUrl"],
+            "maskAssetId": mask_asset["assetId"],
+            "maskUrl": mask_asset["contentUrl"],
+            "predictedVton": res["predictedVton"],
+            "predictedSubtype": res["predictedSubtype"],
+            "confidence": res["confidence"],
+            "bodyPositionNote": res["bodyPositionNote"],
+            "colors": res["colors"],
+            "simulated": res.get("simulated", False),
+        }
 
     def validate_assets(asset_ids, roles):
         """Chặn role sai/ID lặp trước khi tạo job trong queue."""

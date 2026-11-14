@@ -21,6 +21,8 @@ class Pipeline:
         self.store = Store(settings)
         self.assets = Assets(settings, self.store)
         self.vision = Vision(settings)
+        from api.services.vlm import VLMService
+        self.vlm = VLMService(settings)
         self.ootd = self.ootd_type = self.openpose = self.parsing = None
 
     def run(self, job: dict) -> dict:
@@ -39,19 +41,34 @@ class Pipeline:
 
     def visual_assets(self, image, mask, job_id):
         """Tạo mask 0/255 đúng size và RGBA crop từ cùng mask, giống contract notebook."""
+        import cv2
+
         binary = np.asarray(mask, dtype=bool)
         if not binary.any() or binary.all() or binary.shape != (image.height, image.width):
             raise ServiceError("MASK_INVALID", "Mask cần có vùng nền/garment và cùng kích thước ảnh.")
-        rgba = np.asarray(image.convert("RGBA")).copy()
-        rgba[:, :, 3] = binary.astype(np.uint8) * 255
+
+        # Contract bóc tách chuẩn theo product_reference_analysis_colab.ipynb & VLM_and_SAM.md:
+        # 1. Làm mềm alpha ở biên bằng GaussianBlur (Feathering chống răng cưa/rách viền)
+        # 2. Toàn bộ nền ngoài alpha = 0 (trong suốt 100%)
+        # 3. Crop sát garment với 3% padding
+        rgb = np.asarray(image.convert("RGB"))
+        alpha = cv2.GaussianBlur(binary.astype(np.uint8) * 255, (5, 5), 0)
+        rgba_full = np.zeros((image.height, image.width, 4), dtype=np.uint8)
+        rgba_full[:, :, :3] = rgb
+        rgba_full[:, :, 3] = alpha
+
         ys, xs = np.where(binary)
-        cutout = Image.fromarray(rgba).crop((int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1))
-        # Chừa biên trong suốt để PNG luôn thể hiện được alpha khi garment hình chữ nhật.
-        padded = Image.new("RGBA", (cutout.width + 4, cutout.height + 4))
-        padded.paste(cutout, (2, 2))
+        padding = max(8, int(round(0.03 * max(image.width, image.height))))
+        x1 = max(0, int(xs.min()) - padding)
+        x2 = min(image.width, int(xs.max()) + padding + 1)
+        y1 = max(0, int(ys.min()) - padding)
+        y2 = min(image.height, int(ys.max()) + padding + 1)
+        cutout = Image.fromarray(rgba_full[y1:y2, x1:x2])
+
+        mask_img = Image.fromarray(binary.astype(np.uint8) * 255)
         simulated = self.settings.ai_mode == "mock"
-        return (self.assets.save(padded, "cutout", simulated, job_id),
-                self.assets.save(Image.fromarray(binary.astype(np.uint8) * 255), "mask", simulated, job_id))
+        return (self.assets.save(cutout, "cutout", simulated, job_id),
+                self.assets.save(mask_img, "mask", simulated, job_id))
 
     def product(self, payload, job_id):
         """Một sản phẩm nhiều biến thể: joint category, mask đồng bộ, màu riêng, fit chung."""
@@ -91,6 +108,13 @@ class Pipeline:
                 p.session_label, p.session_family = label, category
                 references = p.finalize_model_items(references, label, category)
                 masks = [p.detection_mask(item["detection"], image.size, image=image, refine_background=True) for item, image in zip(products, images)]
+                if getattr(self.settings, "enable_sam2", True):
+                    refined_masks = []
+                    for item, image, mask in zip(products, images, masks):
+                        bbox = item["detection"].get("box")
+                        refined = self.vision.refine_garment_mask_sam(image, bbox, initial_mask=mask)
+                        refined_masks.append(refined if refined is not None else mask)
+                    masks = refined_masks
                 quality = [item["detection"].get("mask_quality", {}) for item in products]
                 masks, consistency = p.synchronize_product_variant_masks(masks, quality, label=label)
                 labels = [label] * len(images)
@@ -200,6 +224,16 @@ class Pipeline:
             mask, gray = get_mask_location(decision["modelType"], mask_category, parsed, self.openpose(prepared.resize((384, 512))))
             mask = mask.resize((768, 1024), Image.Resampling.NEAREST)
             gray = gray.resize((768, 1024), Image.Resampling.NEAREST)
+            # SAM 2 Hand Protection: Loại trừ bàn tay/cổ tay khỏi Inpaint Mask theo VLM_and_SAM.md
+            if getattr(self.settings, "enable_sam2", True) and not target.startswith("long_sleeved"):
+                person_silhouette = np.asarray(parsed.resize((768, 1024), Image.Resampling.NEAREST)) > 0
+                hands_mask = self.vision.protect_hands_with_sam(prepared, pose_context, person_silhouette=person_silhouette)
+                if hands_mask is not None and np.any(hands_mask):
+                    import cv2
+                    eroded_hands = cv2.erode(hands_mask.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=2) > 0
+                    mask_np = np.asarray(mask).copy()
+                    mask_np[eroded_hands] = 0
+                    mask = Image.fromarray(mask_np)
             with torch.inference_mode():
                 outputs = self.ootd(model_type=decision["modelType"], category={"upper_body": "upperbody", "lower_body": "lowerbody", "dress": "dress"}[payload["vtonCategory"]],
                                     image_garm=garment_input, image_vton=Image.composite(gray, prepared, mask), mask=mask, image_ori=prepared,
@@ -223,6 +257,10 @@ class Pipeline:
                 match, _ = q.candidate_match_quality(candidate_detection["label"], target, payload["vtonCategory"])
                 passed = gate_candidate(payload["vtonCategory"], target, outside, body, limb, match)
                 score = candidate_score(payload["vtonCategory"], color, outside, body, limb, fit, candidate_detection["confidence"])
+                if passed and getattr(self.settings, "enable_vlm", True):
+                    vlm_qa = self.vlm.evaluate_tryon_candidate(prepared, garment, image)
+                    if vlm_qa is not None and not vlm_qa.get("passed", True) and float(vlm_qa.get("score", 1.0)) < 0.4:
+                        passed = False
                 reports.append({"index": index, "passed": passed, "matchLevel": match, "outside": outside, "body": body, "limb": limb, "fit": fit, "color": color, "score": score})
                 if passed:
                     composite = q.composite_preserving_source(image, prepared, edit, protected)

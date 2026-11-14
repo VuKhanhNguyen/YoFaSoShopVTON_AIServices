@@ -53,7 +53,7 @@ def test_upload_metadata_content_delete(client, upload):
     assert client.get(asset["contentUrl"]).status_code == 404
 
 
-@pytest.mark.parametrize("method,path", [("post", "/persons/validate"), ("post", "/routing/preview"), ("post", "/products/analyze"), ("post", "/try-on/jobs"), ("post", "/jobs/missing/cancel"), ("post", "/jobs/missing/retry"), ("delete", "/assets/missing")])
+@pytest.mark.parametrize("method,path", [("post", "/persons/validate"), ("post", "/routing/preview"), ("post", "/garments/analyze-color"), ("post", "/products/analyze"), ("post", "/try-on/jobs"), ("post", "/jobs/missing/cancel"), ("post", "/jobs/missing/retry"), ("delete", "/assets/missing")])
 def test_write_auth_required(client, method, path):
     """Các thao tác ghi cũng phải xác thực trước khi tác động queue/storage."""
     response = client.request(method, PREFIX + path, headers={"X-Internal-API-Key": "wrong"}, json={})
@@ -255,6 +255,23 @@ def test_labels():
     assert category_for("short sleeve top") == "upper_body"
     with pytest.raises(ServiceError):
         category_for("unknown")
+
+
+def test_analyze_garment_color(client, upload, image_bytes):
+    """Test nhận diện màu sản phẩm bằng file và bằng asset_id."""
+    garment = upload(role="garment")
+    res_asset = client.post(PREFIX + "/garments/analyze-color", data={"asset_id": garment["assetId"]})
+    assert res_asset.status_code == 200
+    data_asset = res_asset.json()
+    assert "dominantColor" in data_asset
+    assert "palette" in data_asset
+    assert isinstance(data_asset["palette"], list)
+
+    res_file = client.post(PREFIX + "/garments/analyze-color", files={"file": ("sample.png", image_bytes, "image/png")})
+    assert res_file.status_code == 200
+    data_file = res_file.json()
+    assert "dominantColor" in data_file
+    assert "palette" in data_file
 
 
 def test_openapi_valid_and_frozen(client):
