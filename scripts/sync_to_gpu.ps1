@@ -51,16 +51,18 @@ function Sync-CodeFiles {
         return
     }
 
-    # Dong bo tung nhom file code nhe, tranh api/models (~20GB) va __pycache__
-    & scp @sshKeyArgs -P $sshPort "$serviceRoot/api/*.py" "$remoteDest`:$remoteAppDir/api/"
-    & scp @sshKeyArgs -P $sshPort "$serviceRoot/api/core/*.py" "$remoteDest`:$remoteAppDir/api/core/"
-    & scp @sshKeyArgs -P $sshPort "$serviceRoot/api/services/*.py" "$remoteDest`:$remoteAppDir/api/services/"
-    & scp @sshKeyArgs -P $sshPort "$serviceRoot/api/vision/*.py" "$remoteDest`:$remoteAppDir/api/vision/"
-    & scp @sshKeyArgs -P $sshPort "$serviceRoot/workers/*.py" "$remoteDest`:$remoteAppDir/workers/"
-    & scp @sshKeyArgs -P $sshPort "$serviceRoot/scripts/*.py" "$serviceRoot/scripts/*.sh" "$remoteDest`:$remoteAppDir/scripts/"
+    foreach ($dir in 'api', 'api/core', 'api/services', 'api/vision', 'workers', 'scripts') {
+        $sources = @("$serviceRoot/$dir/*.py")
+        if ($dir -eq 'scripts') { $sources += "$serviceRoot/scripts/*.sh" }
+        & scp @sshKeyArgs -P $sshPort @sources "$remoteDest`:$remoteAppDir/$dir/"
+        if ($LASTEXITCODE -ne 0) { throw "SCP that bai khi dong bo $dir." }
+    }
     & scp @sshKeyArgs -P $sshPort "$serviceRoot/requirements-api.txt" "$serviceRoot/requirements-gpu.txt" "$serviceRoot/.env.example" "$serviceRoot/pyproject.toml" "$remoteDest`:$remoteAppDir/"
+    if ($LASTEXITCODE -ne 0) { throw "SCP that bai khi dong bo cau hinh mau." }
+    
+    if ($LASTEXITCODE -ne 0) { throw "SCP that bai khi dong bo nen phong VTON." }
 
-    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Hoan tat dong bo code! (~1-2s)" -ForegroundColor Green
+    Write-Host "Da chep code. Cho job dang chay ket thuc, sau do khoi dong lai python -m workers.runner de nap code moi." -ForegroundColor Yellow
 }
 
 Sync-CodeFiles

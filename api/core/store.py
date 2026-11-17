@@ -148,6 +148,14 @@ class Store:
                 "error": json.loads(row["error"]) if row["error"] else None}
 
     def submit(self, kind, business_id, payload, asset_ids, mode, max_queue):
+        if kind == "TRY_ON":
+            # Preserve the fingerprint of jobs submitted before catalog references were added.
+            optional = {
+                "referenceAssetId", "referenceAssetIds", "catalogFit", "catalogLength",
+                "catalogWaist", "productName", "material", "pattern", "size",
+                "colorName", "colorHex", "roomBackground"
+            }
+            payload = {key: value for key, value in payload.items() if key not in optional or value is not None}
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
         fingerprint = hashlib.sha256((mode + encoded).encode()).hexdigest()
         with self.state() as data:

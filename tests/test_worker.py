@@ -3,10 +3,12 @@ import threading
 import time
 
 import pytest
+from PIL import Image
 
 from api.core.errors import ServiceError
 from api.core.store import Store
 from api.services.pipeline import Pipeline
+from api.services.assets import person_rgb
 from api.services.vision import Vision
 from scripts.cleanup_runtime import cleanup
 from workers.runner import Worker, error_data, worker_lock
@@ -17,14 +19,24 @@ def slow_child(config, connection):
     time.sleep(10)
 
 
-def test_real_watchdog_terminates_child(settings):
+def test_person_alpha_uses_neutral_background():
+    source = Image.new("RGBA", (2, 1), (90, 80, 70, 0))
+    source.putpixel((1, 0), (90, 80, 70, 255))
+    assert list(person_rgb(source).getdata()) == [(248, 248, 248), (90, 80, 70)]
+
+
+@pytest.mark.parametrize("kind,setting", [
+    ("TRY_ON", "vton_job_timeout_seconds"),
+    ("PRODUCT_ANALYSIS", "job_timeout_seconds"),
+])
+def test_real_watchdog_terminates_child(settings, kind, setting):
     """Test cơ chế timeout bằng process thật nhưng không nạp GPU/model."""
     settings.ai_mode = "real"
-    settings.job_timeout_seconds = 1
+    setattr(settings, setting, 1)
     worker = Worker(settings, child_target=slow_child)
     try:
         with pytest.raises(ServiceError) as exc:
-            worker.execute({"id": "timeout-fixture"})
+            worker.execute({"id": "timeout-fixture", "kind": kind})
         assert exc.value.code == "JOB_TIMEOUT"
         assert worker.process is None and worker.connection is None
     finally:

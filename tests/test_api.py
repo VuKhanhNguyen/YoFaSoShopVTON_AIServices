@@ -127,6 +127,20 @@ def test_category_mismatch_and_unknown_fields(client, tryon_payload):
     assert client.post(PREFIX + "/try-on/jobs", json={**tryon_payload, "samples": 10}).status_code == 422
 
 
+def test_tryon_reference_is_role_checked_and_retained(client, upload, tryon_payload):
+    endpoint = PREFIX + "/try-on/jobs"
+    wrong = {**tryon_payload, "referenceAssetId": tryon_payload["garmentAssetId"]}
+    assert client.post(endpoint, json=wrong).status_code == 422
+    reference = upload("reference")["assetId"]
+    detail_reference = upload("reference")["assetId"]
+    body = {**tryon_payload, "referenceAssetIds": [reference, detail_reference],
+            "catalogFit": "SUONG_VUA", "catalogLength": "AO_TIEU_CHUAN"}
+    response = client.post(endpoint, json=body)
+    assert response.status_code == 202, response.text
+    assert client.delete(PREFIX + f"/assets/{reference}").status_code == 409
+    assert client.delete(PREFIX + f"/assets/{detail_reference}").status_code == 409
+
+
 def test_job_end_to_end_mock(client, app, settings, tryon_payload):
     """Submit/poll/result/replay; output mock là placeholder có nhãn, không ảnh gốc."""
     first = client.post(PREFIX + "/try-on/jobs", json=tryon_payload)

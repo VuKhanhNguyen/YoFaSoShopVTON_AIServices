@@ -1,7 +1,7 @@
 """Snapshot hình học/màu/gate từ notebook VTON cell 12; không gọi Space."""
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 
 def prepare_oot_person(source_path, output_path, target_size=(768, 1024)):
@@ -31,6 +31,16 @@ def restore_oot_result(output_image, metadata):
     output_image = output_image.crop(metadata['content_box'])
     return output_image.resize(metadata['original_size'], Image.Resampling.LANCZOS)
 
+def composite_room_background(person, parsed, metadata, room):
+    foreground = Image.fromarray((np.asarray(parsed) > 0).astype(np.uint8) * 255)
+    foreground = foreground.resize(metadata["target_size"], Image.Resampling.BILINEAR)
+    foreground = foreground.crop(metadata["content_box"]).resize(person.size, Image.Resampling.BILINEAR)
+    if foreground.getextrema()[1] == 0:
+        raise ValueError("Không nhận diện được người để ghép nền phòng.")
+    background = ImageOps.fit(room.convert("RGB"), person.size, Image.Resampling.LANCZOS)
+    return Image.composite(person, background, foreground)
+
+
 def garment_edit_mask(source_mask, candidate_mask):
     """Hợp mask đồ cũ/mới và làm mềm biên để giới hạn vùng được phép thay đổi."""
     available_masks = [mask for mask in (source_mask, candidate_mask) if mask is not None]
@@ -58,6 +68,11 @@ def change_to_preservation_score(change_score, scale=25.0):
         return 0.0
     return float(np.exp(-max(0.0, change_score) / scale))
 
+def visible_edit_mask(edit_mask, person_silhouette):
+    """The inpaint area includes background for diffusion, but must not publish that background."""
+    return np.where(person_silhouette, edit_mask, 0).astype(np.uint8)
+
+
 def composite_preserving_source(candidate_image, source_image, edit_mask, protected_mask=None):
     """Bước composite_preserving_source: helper thuần trích từ notebook; xem service gọi để biết luồng dữ liệu."""
     candidate_np = np.asarray(candidate_image.convert('RGB'), dtype=np.float32)
@@ -72,7 +87,7 @@ def composite_preserving_source(candidate_image, source_image, edit_mask, protec
     protected = candidate_np * alpha + source_np * (1.0 - alpha)
     return Image.fromarray(np.clip(protected, 0, 255).astype(np.uint8))
 
-def upper_body_protected_mask(image_size, pose_context, target_label):
+def upper_body_protected_mask(image_size, pose_context, target_label, *, return_forearm=False):
     """Bảo vệ phần cánh tay mà vest/áo ngắn tay không được phép tự vẽ thêm vải."""
     if pose_context is None:
         return None
@@ -86,8 +101,9 @@ def upper_body_protected_mask(image_size, pose_context, target_label):
         return None
     shoulder_span = abs(float(keypoints[6][0] - keypoints[5][0]))
     thickness = max(12, min(42, int(round(max(60.0, shoulder_span) * 0.18))))
-    start_fraction = 0.15 if any((name in label for name in ('vest', 'sling'))) else 0.45
+    start_fraction = 0.15 if any((name in label for name in ('vest', 'sling'))) else 0.70
     protected = np.zeros((height, width), dtype=np.uint8)
+    forearm = np.zeros_like(protected) if return_forearm else None
     for (shoulder_index, elbow_index, wrist_index) in ((5, 7, 9), (6, 8, 10)):
         if min(confidences[[shoulder_index, elbow_index, wrist_index]]) < 0.25:
             continue
@@ -102,9 +118,17 @@ def upper_body_protected_mask(image_size, pose_context, target_label):
         cv2.line(protected, elbow_xy, wrist_xy, 255, thickness, cv2.LINE_AA)
         cv2.circle(protected, elbow_xy, thickness // 2, 255, -1, cv2.LINE_AA)
         cv2.circle(protected, wrist_xy, thickness // 2, 255, -1, cv2.LINE_AA)
+        if forearm is not None:
+            # Chừa vùng khuỷu tay cho cổ tay áo lửng/ngắn tay dáng rộng, bắt đầu từ 25% cẳng tay
+            width_px = 2 * thickness
+            forearm_start = elbow + 0.25 * (wrist - elbow)
+            forearm_start_xy = tuple(np.rint(forearm_start).astype(int))
+            cv2.line(forearm, forearm_start_xy, wrist_xy, 255, width_px)
+            cv2.circle(forearm, wrist_xy, width_px // 2, 255, -1)
     if not np.any(protected):
         return None
-    return cv2.GaussianBlur(protected, (0, 0), sigmaX=4, sigmaY=4)
+    protection = cv2.GaussianBlur(protected, (0, 0), sigmaX=4, sigmaY=4)
+    return (protection, forearm) if return_forearm else protection
 
 def protected_region_artifact_score(candidate_image, source_image, protected_mask):
     """Trả (tỷ lệ artefact nặng, điểm bảo toàn) trên vùng da tay cần giữ nguyên."""
@@ -153,6 +177,24 @@ def garment_fit_score(candidate_mask, pose_context, expected_category, target_la
             max_height_ratio = 2.2 if long_sleeved else 1.45
             penalty += 0.2 * min(1.0, max(0.0, width_ratio - max_width_ratio) / 0.8)
             penalty += 0.2 * min(1.0, max(0.0, height_ratio - max_height_ratio) / 0.8)
+    elif expected_category == 'lower_body':
+        keypoints = pose_context.get('keypoints')
+        confidences = pose_context.get('confidences')
+        if keypoints is not None and len(keypoints) >= 17 and min(confidences[[11, 12]]) >= 0.2:
+            hip_y = float(np.mean(keypoints[[11, 12], 1]))
+            knee_y = float(np.mean(keypoints[[13, 14], 1]))
+            ankle_y = float(np.mean(keypoints[[15, 16], 1]))
+            if ankle_y > knee_y:
+                leg_span = max(10.0, ankle_y - hip_y)
+                cand_hem_y = float(ys.max())
+                norm_hem = (cand_hem_y - hip_y) / leg_span
+                is_shorts = (target_label == 'shorts') or ('short' in (target_label or '').lower())
+                if is_shorts:
+                    if norm_hem > 0.82:
+                        penalty += 0.40  # Quần short nhưng bị dài quá gối sát mắt cá chân
+                else:
+                    if norm_hem < 0.68:
+                        penalty += 0.50  # Quần dài nhưng bị cụt thành quần short!
     return float(np.clip(1.0 - penalty, 0.0, 1.0))
 
 def calculate_limb_integrity_score(candidate_mask, pose_context, garment_label):
@@ -271,5 +313,66 @@ def candidate_match_quality(candidate_label, target_label, expected_category):
             return (2, f'cùng nhóm kiểu tay ({target_family})')
         return (1, 'đúng dress nhưng sai kiểu tay/subtype')
     if expected_category == 'lower_body':
+        if candidate_label in {'shorts', 'trousers', 'skirt'}:
+            return (2, f"cùng nhóm lower-body ({candidate_label} thay vì {target_label})")
         return (1, f"đúng lower-body nhưng detector nhận '{candidate_label}' thay vì '{target_label}'")
     return (1, 'đúng upper-body nhưng khác subtype')
+
+
+def analyze_model_garment_fit(pose_context, garment_mask):
+    """Đo tỷ lệ chiều dài tay áo trên người mẫu shop hoặc candidate (theo notebook Colab ver2)."""
+    if pose_context is None or garment_mask is None:
+        return None
+    kpts = pose_context.get('keypoints')
+    confs = pose_context.get('confidences')
+    if kpts is None or confs is None or len(kpts) < 11:
+        return None
+    mask = garment_mask > 127 if getattr(garment_mask, 'dtype', None) != bool else garment_mask
+    ys, xs = np.where(mask)
+    if len(xs) < 50:
+        return None
+    sleeve_ratios = []
+    for s_idx, e_idx in ((5, 7), (6, 8)):
+        if confs[s_idx] >= 0.25 and confs[e_idx] >= 0.25:
+            sy, sx = kpts[s_idx][1], kpts[s_idx][0]
+            ey, ex = kpts[e_idx][1], kpts[e_idx][0]
+            arm_span = max(10.0, ey - sy)
+            arm_side_ys = ys[xs < sx + 15] if s_idx == 5 else ys[xs > sx - 15]
+            if len(arm_side_ys):
+                sleeve_hem_y = float(arm_side_ys.max())
+                sleeve_length = max(0.0, sleeve_hem_y - sy)
+                sleeve_ratios.append(min(2.2, sleeve_length / arm_span))
+    avg_sleeve = float(np.mean(sleeve_ratios)) if sleeve_ratios else 0.5
+    return {"sleeve_ratio": round(avg_sleeve, 3)}
+
+
+def lower_body_length_fidelity(candidate_mask, pose_context, target_subtype, catalog_length=None):
+    """Đảm bảo quần dài không bị nhận nhầm/chọn nhầm thành quần short và ngược lại."""
+    if candidate_mask is None or pose_context is None:
+        return 1.0
+    keypoints = pose_context.get("keypoints")
+    if keypoints is None or len(keypoints) < 17:
+        return 1.0
+    mask = candidate_mask > 127 if getattr(candidate_mask, 'dtype', None) != bool else candidate_mask
+    ys, xs = np.where(mask)
+    if len(ys) < 50:
+        return 0.5
+    cand_hem_y = float(ys.max())
+    hip_y = float(np.mean(keypoints[[11, 12], 1]))
+    knee_y = float(np.mean(keypoints[[13, 14], 1]))
+    ankle_y = float(np.mean(keypoints[[15, 16], 1]))
+    if ankle_y <= knee_y:
+        return 1.0
+    leg_span = max(10.0, ankle_y - hip_y)
+    norm_hem = (cand_hem_y - hip_y) / leg_span
+    is_shorts = (target_subtype == "shorts") or (catalog_length in ("SHORT", "NGAN_TREN_GOI")) or ("short" in (target_subtype or "").lower())
+    if is_shorts:
+        if norm_hem > 0.82:
+            return 0.2
+        return 1.0
+    else:
+        # Quần dài (trousers, jeans, kaki, jogger, DAI_CHAM_GOT): gấu quần phải tới gần mắt cá chân
+        if norm_hem < 0.68:
+            return 0.0
+        return float(np.clip((norm_hem - 0.65) / 0.25, 0.2, 1.0))
+

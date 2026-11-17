@@ -267,15 +267,21 @@ def main():
             slug = pdir.name
 
         vton_cat = db_map.get("PhanLoaiVTON") or struct_data.get("vton_category")
-        if not vton_cat:
-            if "lower_body" in md_content or "Quan" in rel_cat or "ChanVay" in rel_cat:
+        if "Quan" in rel_cat or "ChanVay" in rel_cat:
+            vton_cat = "lower_body"
+        elif "Dam" in rel_cat or "AoDai" in rel_cat:
+            vton_cat = "dress"
+        elif not vton_cat:
+            if "lower_body" in md_content:
                 vton_cat = "lower_body"
-            elif "dress" in md_content or "Dam" in rel_cat or "AoDai" in rel_cat:
+            elif "dress" in md_content:
                 vton_cat = "dress"
             else:
                 vton_cat = "upper_body"
 
         tieu_loai = db_map.get("TieuLoaiTrangPhuc") or struct_data.get("resolved_label") or struct_data.get("category") or "short_sleeved_shirt"
+        if vton_cat == "lower_body" and tieu_loai in ("short_sleeved_shirt", "long_sleeved_shirt", "vest", "sling"):
+            tieu_loai = "shorts" if "Short" in rel_cat else "trousers"
 
         mask_path = db_map.get("DuongDanMatNaVungThayDo")
         if not mask_path:

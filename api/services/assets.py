@@ -10,6 +10,13 @@ from api.core.errors import ServiceError
 from api.core.store import now
 
 
+def person_rgb(image):
+    if "A" not in image.getbands():
+        return image.convert("RGB")
+    background = Image.new("RGBA", image.size, (248, 248, 248, 255))
+    return Image.alpha_composite(background, image.convert("RGBA")).convert("RGB")
+
+
 class Assets:
     """Không lưu tên/path người dùng, không public StaticFiles chứa ảnh khách."""
 

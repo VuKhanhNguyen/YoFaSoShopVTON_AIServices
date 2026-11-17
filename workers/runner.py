@@ -116,7 +116,9 @@ class Worker:
             self.process.start()
             child.close()
         self.connection.send(job)
-        deadline = time.monotonic() + self.settings.job_timeout_seconds
+        timeout = (self.settings.vton_job_timeout_seconds if job["kind"] == "TRY_ON"
+                   else self.settings.job_timeout_seconds)
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline and not self.stop.is_set():
             self.heartbeat()
             if self.connection.poll(min(1, max(.01, deadline - time.monotonic()))):

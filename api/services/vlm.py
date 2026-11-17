@@ -108,7 +108,9 @@ class VLMService:
         return None
 
     def evaluate_tryon_candidate(
-        self, person_img: Image.Image, garment_img: Image.Image, result_img: Image.Image
+        self, person_img: Image.Image, garment_img: Image.Image, result_img: Image.Image,
+        reference_images: list[Image.Image] | None = None, catalog_context: str = "",
+        *, confirm_short_sleeve: bool = False,
     ) -> dict | None:
         """QA Gatekeeper: Evaluate VTON result against original person and garment.
 
@@ -126,6 +128,16 @@ class VLMService:
             g_img.thumbnail((384, 512), Image.Resampling.LANCZOS)
             r_img = result_img.copy()
             r_img.thumbnail((384, 512), Image.Resampling.LANCZOS)
+            images = [p_img, g_img, r_img]
+            reference_instruction = ""
+            for reference_img in reference_images or []:
+                reference = reference_img.convert("RGB")
+                reference.thumbnail((384, 512), Image.Resampling.LANCZOS)
+                images.append(reference)
+                reference_instruction = (
+                    "Images after image 3 show the garment worn. Compare cuff height relative to shoulders and elbows, "
+                    "and hem placement relative to the waist. Do not copy tucked styling, belts, trousers, or identity.\n"
+                )
 
             prompt = (
                 "You are an AI Virtual Try-On QA evaluator. Check the result image against the original person and garment.\n"
@@ -133,10 +145,15 @@ class VLMService:
                 "1. Hand and finger integrity (are hands deformed or blurred?).\n"
                 "2. Natural blending at collar, neck, and waist.\n"
                 "3. Garment color and pattern fidelity.\n"
+                "4. Reject gray mask halos, duplicated sleeves, leftover original clothing, and mismatched sleeve length.\n"
+                f"Catalog category, subtype, fit and length: {catalog_context}.\n"
+                f"{reference_instruction}"
+                f"{'Check both cuffs explicitly. Set shortSleeveConfirmed to true only if both sleeves end above the elbows and there are no fabric strips below either cuff.' if confirm_short_sleeve else ''}\n"
                 "Reply ONLY with a single JSON object:\n"
                 "{\n"
                 '  "passed": true | false,\n'
                 '  "score": float between 0.0 and 1.0,\n'
+                '  "shortSleeveConfirmed": true or false,\n'
                 '  "reason": "short explanation"\n'
                 "}\n"
                 "Do not include markdown or explanations. Only raw JSON."
@@ -145,15 +162,13 @@ class VLMService:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "image", "image": p_img},
-                        {"type": "image", "image": g_img},
-                        {"type": "image", "image": r_img},
+                        *[{"type": "image", "image": img} for img in images],
                         {"type": "text", "text": prompt},
                     ],
                 }
             ]
             text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            inputs = self.processor(text=[text], images=[p_img, g_img, r_img], padding=True, return_tensors="pt")
+            inputs = self.processor(text=[text], images=images, padding=True, return_tensors="pt")
             if torch.cuda.is_available():
                 inputs = {k: v.to("cuda") for k, v in inputs.items()}
             with torch.inference_mode():

@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     embedded_worker: bool = False
     worker_poll_seconds: float = 0.25
     job_timeout_seconds: int = 300
+    vton_job_timeout_seconds: int = 900
     worker_lease_seconds: int = 30
     max_job_attempts: int = 2
     max_queue_size: int = 20
@@ -57,7 +58,7 @@ class Settings(BaseSettings):
             raise ValueError("Production không được dùng AI_MODE=mock")
         if self.embedded_worker and self.ai_mode != "mock":
             raise ValueError("EMBEDDED_WORKER chỉ dùng cho mock; model thật chạy worker riêng")
-        for field in ("job_timeout_seconds", "worker_lease_seconds", "max_queue_size", "rate_limit_per_minute", "max_upload_bytes", "max_image_pixels", "min_image_side", "retention_hours", "max_variants", "max_job_attempts"):
+        for field in ("job_timeout_seconds", "vton_job_timeout_seconds", "worker_lease_seconds", "max_queue_size", "rate_limit_per_minute", "max_upload_bytes", "max_image_pixels", "min_image_side", "retention_hours", "max_variants", "max_job_attempts"):
             if getattr(self, field) <= 0:
                 raise ValueError(f"{field} phải lớn hơn 0")
         if self.worker_poll_seconds <= 0:

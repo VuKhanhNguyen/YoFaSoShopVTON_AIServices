@@ -23,7 +23,7 @@ from api.core.body_limit import BodyLimitMiddleware, BodyTooLarge
 from api.core.errors import ServiceError
 from api.core.store import Store
 from api.schemas import AssetResponse, ErrorResponse, JobResponse, PersonRequest, ProductRequest, RouteRequest, Status, TryOnRequest
-from api.services.assets import Assets
+from api.services.assets import Assets, person_rgb
 from api.services.routing import DRESSES, LOWER, UPPER, route
 from api.services.vision import Vision
 
@@ -218,7 +218,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def validate_person(body: PersonRequest):
         """Kiểm tra nội dung ảnh người; có thể kiểm tra thêm frame/category trước submit."""
         image = assets.open(body.asset_id, {"person", "reference"})
-        result = vision.validate_person(image)
+        result = vision.validate_person(person_rgb(image))
         if body.vton_category:
             result["route"] = route(body.vton_category, result["personFrame"], body.garment_subtype, body.garment_length)
             result["accepted"] = result["accepted"] and result["route"]["accepted"]
@@ -326,8 +326,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """Tạo VTON idempotent theo sessionId; validation ảnh chạy trước diffusion trong worker."""
         validate_assets([body.person_asset_id], {"person"})
         validate_assets([body.garment_asset_id], {"garment"})
+        references = body.reference_asset_ids or ([body.reference_asset_id] if body.reference_asset_id else [])
+        validate_assets(references, {"reference"})
         route(body.vton_category, "full_body", body.garment_subtype, body.garment_length)
-        return store.public_job(store.submit("TRY_ON", body.session_id, body.model_dump(by_alias=True), [body.person_asset_id, body.garment_asset_id], settings.ai_mode, settings.max_queue_size))
+        payload = body.model_dump(by_alias=True)
+        return store.public_job(store.submit("TRY_ON", body.session_id, payload, [body.person_asset_id, body.garment_asset_id, *references], settings.ai_mode, settings.max_queue_size))
 
     @router.get("/jobs", tags=["Jobs"])
     def list_jobs(limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0), status: Status | None = None):

@@ -1378,6 +1378,140 @@
         ]
       }
     },
+    "/internal/v1/garments/segment-realtime": {
+      "post": {
+        "tags": [
+          "Vision"
+        ],
+        "summary": "Segment Garment Realtime",
+        "description": "Bóc tách nền và tạo Agnostic Mask realtime bằng YOLOv8s-seg + SAM 2.",
+        "operationId": "segment_garment_realtime_internal_v1_garments_segment_realtime_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_segment_garment_realtime_internal_v1_garments_segment_realtime_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request Entity Too Large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Media Type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Entity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
+      }
+    },
     "/internal/v1/products/analyze": {
       "post": {
         "tags": [
@@ -2450,6 +2584,38 @@
         "type": "object",
         "title": "Body_analyze_garment_color_internal_v1_garments_analyze_color_post"
       },
+      "Body_segment_garment_realtime_internal_v1_garments_segment_realtime_post": {
+        "properties": {
+          "garment_asset_id": {
+            "type": "string",
+            "title": "Garment Asset Id"
+          },
+          "reference_asset_id": {
+            "type": "string",
+            "title": "Reference Asset Id"
+          },
+          "category": {
+            "type": "string",
+            "title": "Category"
+          },
+          "subtype": {
+            "type": "string",
+            "title": "Subtype"
+          },
+          "garment_file": {
+            "type": "string",
+            "format": "binary",
+            "title": "Garment File"
+          },
+          "reference_file": {
+            "type": "string",
+            "format": "binary",
+            "title": "Reference File"
+          }
+        },
+        "type": "object",
+        "title": "Body_segment_garment_realtime_internal_v1_garments_segment_realtime_post"
+      },
       "Body_upload_asset_internal_v1_assets_post": {
         "properties": {
           "file": {
@@ -2787,6 +2953,153 @@
             "type": "string",
             "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
             "title": "Garmentassetid"
+          },
+          "roomBackground": {
+            "anyOf": [
+              {
+                "type": "boolean",
+                "const": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Roombackground"
+          },
+          "referenceAssetId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Referenceassetid"
+          },
+          "referenceAssetIds": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+                },
+                "type": "array",
+                "maxItems": 2
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Referenceassetids"
+          },
+          "catalogFit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Catalogfit"
+          },
+          "catalogLength": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cataloglength"
+          },
+          "catalogWaist": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Catalogwaist"
+          },
+          "productName": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Productname"
+          },
+          "material": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Material"
+          },
+          "pattern": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pattern"
+          },
+          "size": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 32
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size"
+          },
+          "colorName": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Colorname"
+          },
+          "colorHex": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Colorhex"
           },
           "vtonCategory": {
             "type": "string",

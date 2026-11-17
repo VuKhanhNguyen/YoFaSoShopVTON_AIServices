@@ -57,6 +57,18 @@ class TryOnRequest(DTO):
     variant_id: Identifier
     person_asset_id: Identifier
     garment_asset_id: Identifier
+    room_background: Literal[True] | None = None
+    reference_asset_id: Identifier | None = None
+    reference_asset_ids: list[Identifier] | None = Field(default=None, max_length=2)
+    catalog_fit: str | None = None
+    catalog_length: str | None = Field(default=None, max_length=64)
+    catalog_waist: str | None = Field(default=None, max_length=64)
+    product_name: str | None = Field(default=None, max_length=255)
+    material: str | None = Field(default=None, max_length=255)
+    pattern: str | None = Field(default=None, max_length=128)
+    size: str | None = Field(default=None, max_length=32)
+    color_name: str | None = Field(default=None, max_length=64)
+    color_hex: str | None = Field(default=None, max_length=64)
     vton_category: Category
     garment_subtype: str | None = Field(default=None, max_length=64)
     garment_length: Length = "UNKNOWN"
