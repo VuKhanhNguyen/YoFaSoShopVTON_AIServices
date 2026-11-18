@@ -275,27 +275,138 @@ def evaluate_dress_proportions_and_color(candidate_image, candidate_mask, pose_c
     return (dress_fit_score, color_score)
 
 def garment_color_similarity(reference_image, reference_mask, candidate_image, candidate_mask):
-    """So màu trong vùng garment bằng histogram Lab; 1.0 là gần màu gốc nhất."""
+    """So màu trong vùng garment bằng Lab histogram + moment khoảng cách mượt; tránh cliff ở biên bin trắng/kem."""
     if reference_mask is None or candidate_mask is None:
         return 0.0
 
-    def masked_lab_histogram(image, mask):
+    def extract_lab_stats(image, mask):
         image_np = np.asarray(image.convert('RGB'), dtype=np.uint8)
-        mask = (mask > 127).astype(np.uint8) * 255
-        clean_mask = cv2.erode(mask, np.ones((5, 5), np.uint8), iterations=1)
+        mask_u8 = (mask > 127).astype(np.uint8) * 255
+        clean_mask = cv2.erode(mask_u8, np.ones((5, 5), np.uint8), iterations=1)
         if np.count_nonzero(clean_mask) < 50:
-            clean_mask = mask
+            clean_mask = mask_u8
         if np.count_nonzero(clean_mask) < 50:
-            return None
+            return None, None
         lab_image = cv2.cvtColor(image_np, cv2.COLOR_RGB2LAB)
         histogram = cv2.calcHist([lab_image], [0, 1, 2], clean_mask, [8, 12, 12], [0, 256, 0, 256, 0, 256])
-        return cv2.normalize(histogram, None, alpha=1.0, norm_type=cv2.NORM_L1)
-    reference_histogram = masked_lab_histogram(reference_image, reference_mask)
-    candidate_histogram = masked_lab_histogram(candidate_image, candidate_mask)
-    if reference_histogram is None or candidate_histogram is None:
+        histogram = cv2.normalize(histogram, None, alpha=1.0, norm_type=cv2.NORM_L1)
+        pixels = lab_image[clean_mask > 0].astype(np.float32)
+        return histogram, (pixels.mean(axis=0), float(pixels[:, 0].std()))
+
+    ref_hist, ref_stats = extract_lab_stats(reference_image, reference_mask)
+    cand_hist, cand_stats = extract_lab_stats(candidate_image, candidate_mask)
+    if ref_hist is None or cand_hist is None:
         return 0.0
-    distance = cv2.compareHist(reference_histogram, candidate_histogram, cv2.HISTCMP_BHATTACHARYYA)
-    return float(np.clip(1.0 - distance, 0.0, 1.0))
+    hist_sim = float(np.clip(1.0 - cv2.compareHist(ref_hist, cand_hist, cv2.HISTCMP_BHATTACHARYYA), 0.0, 1.0))
+    ref_mean, ref_std_l = ref_stats
+    cand_mean, cand_std_l = cand_stats
+    dist = float(np.sqrt(
+        ((cand_mean[0] - ref_mean[0]) / 35.0) ** 2
+        + ((cand_mean[1] - ref_mean[1]) / 20.0) ** 2
+        + ((cand_mean[2] - ref_mean[2]) / 20.0) ** 2
+        + 0.5 * ((cand_std_l - ref_std_l) / 30.0) ** 2
+    ))
+    moment_sim = float(np.exp(-dist))
+    return float(np.clip(0.55 * hist_sim + 0.45 * moment_sim, 0.0, 1.0))
+
+
+def harmonize_light_garment_tone(composite_image, candidate_mask, reference_image, reference_mask):
+    """Chỉ bù phơi sáng/cân bằng trắng dịu trên áo nền trắng-kem để triệt ám xám (127,127,127), giữ nguyên cổ/bo màu đậm."""
+    if reference_mask is None or candidate_mask is None:
+        return composite_image
+    ref_u8 = (np.asarray(reference_mask) > 127).astype(np.uint8) * 255
+    cand_u8 = (np.asarray(candidate_mask) > 127).astype(np.uint8) * 255
+    if np.count_nonzero(ref_u8) < 100 or np.count_nonzero(cand_u8) < 100:
+        return composite_image
+
+    ref_lab = cv2.cvtColor(np.asarray(reference_image.convert("RGB"), dtype=np.uint8), cv2.COLOR_RGB2LAB).astype(np.float32)
+    ref_eroded = cv2.erode(ref_u8, np.ones((5, 5), np.uint8), iterations=1)
+    ref_px = ref_lab[(ref_eroded if np.count_nonzero(ref_eroded) >= 64 else ref_u8) > 0]
+    ref_chroma = np.hypot(ref_px[:, 1] - 128.0, ref_px[:, 2] - 128.0)
+    light_ref = ref_px[(ref_px[:, 0] >= 185.0) & (ref_chroma <= 24.0)]
+    if len(light_ref) / max(1, len(ref_px)) < 0.65:
+        return composite_image
+
+    comp_rgb = np.asarray(composite_image.convert("RGB"), dtype=np.uint8)
+    comp_lab = cv2.cvtColor(comp_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    cand_eroded = cv2.erode(cand_u8, np.ones((7, 7), np.uint8), iterations=1)
+    cand_px = comp_lab[(cand_eroded if np.count_nonzero(cand_eroded) >= 64 else cand_u8) > 0]
+    cand_chroma = np.hypot(cand_px[:, 1] - 128.0, cand_px[:, 2] - 128.0)
+    body_px = cand_px[(cand_px[:, 0] >= 115.0) & (cand_chroma <= 26.0)]
+    if len(body_px) < 64:
+        return composite_image
+
+    dl = float(np.median(light_ref[:, 0]) - np.median(body_px[:, 0]))
+    da = float(np.median(light_ref[:, 1]) - np.median(body_px[:, 1]))
+    db = float(np.median(light_ref[:, 2]) - np.median(body_px[:, 2]))
+    if abs(dl) < 8.0 and abs(da) < 4.0 and abs(db) < 4.0:
+        return composite_image
+
+    # Weight = 0 trên cổ/bo/logo đậm màu (L < 120 hoặc sắc độ cao) và mượt dần ở viền mask
+    pix_l = comp_lab[:, :, 0]
+    pix_c = np.hypot(comp_lab[:, :, 1] - 128.0, comp_lab[:, :, 2] - 128.0)
+    light_gate = np.clip((pix_l - 120.0) / 45.0, 0.0, 1.0)
+    neutral_gate = np.clip(1.0 - (pix_c - 12.0) / 18.0, 0.0, 1.0)
+    mask_soft = cv2.GaussianBlur(cand_u8.astype(np.float32) / 255.0, (9, 9), 0)
+    weight = mask_soft * light_gate * neutral_gate
+
+    shifted_lab = comp_lab.copy()
+    shifted_lab[:, :, 0] = np.clip(pix_l + weight * float(np.clip(dl * 0.70, -18.0, 42.0)), 0.0, 255.0)
+    shifted_lab[:, :, 1] = np.clip(comp_lab[:, :, 1] + weight * float(np.clip(da * 0.70, -14.0, 14.0)), 0.0, 255.0)
+    shifted_lab[:, :, 2] = np.clip(comp_lab[:, :, 2] + weight * float(np.clip(db * 0.70, -14.0, 14.0)), 0.0, 255.0)
+    harmonized = cv2.cvtColor(np.rint(shifted_lab).astype(np.uint8), cv2.COLOR_LAB2RGB)
+    return Image.fromarray(harmonized)
+
+
+def harmonize_sleeveless_arm_skin(generated_image, source_image, candidate_mask, person_labels, source_top):
+    """Đồng bộ màu da vai/bắp tay vùng cắt tay áo cũ theo màu da thật trên ảnh gốc, xóa vết hằn cộc tay."""
+    cand_bool = np.asarray(candidate_mask) > 127
+    source_bool = np.asarray(source_top, dtype=bool)
+    arms = np.isin(person_labels, (14, 15))
+    if not np.any(arms) or not np.any(source_bool):
+        return generated_image, None
+
+    arm_transition = (cv2.dilate(source_bool.astype(np.uint8), np.ones((15, 15), np.uint8), iterations=1) > 0) & arms
+    arm_zone = cv2.dilate(arms.astype(np.uint8), np.ones((45, 45), np.uint8), iterations=1) > 0
+    exposed_arm = (source_bool | arm_transition) & ~cand_bool & arm_zone
+    if np.count_nonzero(exposed_arm) < 64:
+        return generated_image, None
+
+    src_lab = cv2.cvtColor(np.asarray(source_image.convert("RGB"), dtype=np.uint8), cv2.COLOR_RGB2LAB).astype(np.float32)
+    gen_lab = cv2.cvtColor(np.asarray(generated_image.convert("RGB"), dtype=np.uint8), cv2.COLOR_RGB2LAB).astype(np.float32)
+
+    old_sleeve_dilated = cv2.dilate(source_bool.astype(np.uint8), np.ones((19, 19), np.uint8), iterations=1) > 0
+    bare_arm = arms & ~old_sleeve_dilated & ~cand_bool
+    ref_px = src_lab[bare_arm]
+    ref_px = ref_px[ref_px[:, 0] >= 85.0]
+    if len(ref_px) < 120:
+        # Ảnh khách mặc áo dài tay che hết cánh tay: lấy vùng cổ/mặt dưới làm mẫu màu da thật
+        head_ys, head_xs = np.where(person_labels == 11)
+        if len(head_ys) > 0:
+            y_neck = int(head_ys.min() + (head_ys.max() - head_ys.min()) * 0.65)
+            neck_mask = (person_labels == 11) & (np.arange(person_labels.shape[0])[:, None] >= y_neck)
+            ref_px = src_lab[neck_mask]
+            ref_px = ref_px[ref_px[:, 0] >= 85.0]
+    if len(ref_px) < 48:
+        return generated_image, exposed_arm
+
+    core_exposed = cv2.erode(exposed_arm.astype(np.uint8), np.ones((5, 5), np.uint8), iterations=1) > 0
+    gen_px = gen_lab[core_exposed if np.count_nonzero(core_exposed) >= 48 else exposed_arm]
+    gen_px = gen_px[gen_px[:, 0] >= 85.0]
+    if len(gen_px) < 32:
+        return generated_image, exposed_arm
+
+    dl = float(np.clip((np.median(ref_px[:, 0]) - np.median(gen_px[:, 0])) * 0.92, -38.0, 38.0))
+    da = float(np.clip((np.median(ref_px[:, 1]) - np.median(gen_px[:, 1])) * 0.95, -22.0, 22.0))
+    db = float(np.clip((np.median(ref_px[:, 2]) - np.median(gen_px[:, 2])) * 0.95, -22.0, 22.0))
+
+    weight = cv2.GaussianBlur(exposed_arm.astype(np.float32), (21, 21), 0)
+    weight = np.where(cand_bool, 0.0, weight)
+    shifted = gen_lab.copy()
+    shifted[:, :, 0] = np.clip(gen_lab[:, :, 0] + weight * dl, 0.0, 255.0)
+    shifted[:, :, 1] = np.clip(gen_lab[:, :, 1] + weight * da, 0.0, 255.0)
+    shifted[:, :, 2] = np.clip(gen_lab[:, :, 2] + weight * db, 0.0, 255.0)
+    return Image.fromarray(cv2.cvtColor(np.rint(shifted).astype(np.uint8), cv2.COLOR_LAB2RGB)), exposed_arm
 DRESS_STYLE_FAMILY = {'vest_dress': 'sleeveless_dress', 'sling_dress': 'sleeveless_dress', 'short_sleeved_dress': 'short_sleeved_dress', 'long_sleeved_dress': 'long_sleeved_dress'}
 
 def candidate_match_quality(candidate_label, target_label, expected_category):

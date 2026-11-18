@@ -141,7 +141,8 @@ class Vision:
             if not wrist_boxes:
                 return None
 
-            results = sam_model(image, bboxes=wrist_boxes, verbose=False)
+            device = getattr(self.settings, "vision_device", "cuda")
+            results = sam_model(image, bboxes=wrist_boxes, device=device, verbose=False)
             if not results or len(results) == 0 or results[0].masks is None:
                 return None
 
@@ -175,17 +176,22 @@ class Vision:
         frame = "full_body" if visible[[13, 14]].any() and visible[[15, 16]].any() else "three_quarter" if visible[[13, 14]].any() else "half_body"
         return {"accepted": True, "personFrame": frame, "simulated": False, "warnings": []}
 
-    def garment(self, image, category=None):
+    def garment(self, image, category=None, *, refine_sam: bool = False):
         """Trả detection+mask thật; category không khớp phải chặn trước diffusion."""
         with VISION_LOCK:
             self.load()
-            detections = self.primitives.fashion_candidates(image.convert("RGB"))
+            rgb = image.convert("RGB")
+            detections = self.primitives.fashion_candidates(rgb)
             if category:
                 detections = [d for d in detections if category_for(d["label"]) == category]
             best = self.primitives.choose_primary_garment(detections)
             if best is None:
                 raise ServiceError("GARMENT_NOT_FOUND", "Không tìm thấy trang phục đúng vùng yêu cầu.")
-            mask = self.primitives.detection_mask(best, image.size, image=image.convert("RGB"), refine_background=True)
+            mask = self.primitives.detection_mask(best, image.size, image=rgb, refine_background=True)
+            if refine_sam and getattr(self.settings, "enable_sam2", True) and best.get("box") is not None:
+                refined = self.refine_garment_mask_sam(rgb, best.get("box"), initial_mask=mask)
+                if refined is not None:
+                    mask = refined
         return best, mask
 
     def analyze_garment_color(self, image):

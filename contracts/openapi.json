@@ -2692,6 +2692,33 @@
           "status": {
             "$ref": "#/components/schemas/Status"
           },
+          "progress": {
+            "type": "integer",
+            "title": "Progress",
+            "default": 0
+          },
+          "stage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stage"
+          },
+          "stageMessage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stagemessage"
+          },
           "createdAt": {
             "type": "string",
             "title": "Createdat"

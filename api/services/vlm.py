@@ -37,12 +37,14 @@ class VLMService:
             device = "cuda" if torch.cuda.is_available() else "cpu"
             self.processor = AutoProcessor.from_pretrained(str(model_dir))
             try:
+                from transformers import BitsAndBytesConfig
                 # 4-bit quantization via bitsandbytes to stay within 24GB VRAM
+                bnb_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.float16) if device == "cuda" else None
                 self.model = Qwen2VLForConditionalGeneration.from_pretrained(
                     str(model_dir),
                     torch_dtype=torch.float16,
                     device_map="auto" if device == "cuda" else None,
-                    load_in_4bit=(device == "cuda"),
+                    quantization_config=bnb_config,
                 )
             except Exception:
                 self.model = Qwen2VLForConditionalGeneration.from_pretrained(
@@ -98,7 +100,7 @@ class VLMService:
             if torch.cuda.is_available():
                 inputs = {k: v.to("cuda") for k, v in inputs.items()}
             with torch.inference_mode():
-                outputs = model.generate(**inputs, max_new_tokens=150, temperature=0.01)
+                outputs = model.generate(**inputs, max_new_tokens=150, do_sample=False, top_k=None, top_p=None, temperature=None)
             raw = self.processor.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
             match = re.search(r"\{[\s\S]*\}", raw)
             if match:
@@ -128,25 +130,33 @@ class VLMService:
             g_img.thumbnail((384, 512), Image.Resampling.LANCZOS)
             r_img = result_img.copy()
             r_img.thumbnail((384, 512), Image.Resampling.LANCZOS)
+            content = [
+                {"type": "text", "text": "Image 1 (Person before try-on):"},
+                {"type": "image", "image": p_img},
+                {"type": "text", "text": "Image 2 (Target garment):"},
+                {"type": "image", "image": g_img},
+                {"type": "text", "text": "Image 3 (Try-on result to evaluate):"},
+                {"type": "image", "image": r_img},
+            ]
             images = [p_img, g_img, r_img]
             reference_instruction = ""
-            for reference_img in reference_images or []:
-                reference = reference_img.convert("RGB")
+            if confirm_short_sleeve and reference_images:
+                reference = reference_images[0].convert("RGB")
                 reference.thumbnail((384, 512), Image.Resampling.LANCZOS)
+                content.extend([
+                    {"type": "text", "text": "Image 4 (Worn garment reference; ignore model identity and trousers):"},
+                    {"type": "image", "image": reference},
+                ])
                 images.append(reference)
-                reference_instruction = (
-                    "Images after image 3 show the garment worn. Compare cuff height relative to shoulders and elbows, "
-                    "and hem placement relative to the waist. Do not copy tucked styling, belts, trousers, or identity.\n"
-                )
+                reference_instruction = "Compare cuff height against Image 4 (ignore tucked styling, belts, trousers).\n"
 
             prompt = (
-                "You are an AI Virtual Try-On QA evaluator. Check the result image against the original person and garment.\n"
-                "Evaluate:\n"
-                "1. Hand and finger integrity (are hands deformed or blurred?).\n"
-                "2. Natural blending at collar, neck, and waist.\n"
-                "3. Garment color and pattern fidelity.\n"
-                "4. Reject gray mask halos, duplicated sleeves, leftover original clothing, and mismatched sleeve length.\n"
-                f"Catalog category, subtype, fit and length: {catalog_context}.\n"
+                "Assume garment category and sleeve detection ALREADY passed. Evaluate ONLY visual defects in Image 3 (Try-on result) against Image 2 (Target garment) and Image 1 (Person before try-on):\n"
+                "1. Hand/arm integrity (deformed hands, missing forearms, or duplicated sleeves).\n"
+                "2. Garment color fidelity against Image 2 (reject dark/gray stains or wrong split colors across a light garment body; ignore studio briefs/shorts visible below an untucked hem).\n"
+                "3. Severe seams, mask halos, garbled text bands, hallucinated pockets/trousers on the torso, or unreplaced original shirt (HOWEVER, if Image 2 / Context is a layered blazer, vest, gile, or cardigan, seeing Image 1's inner shirt collar/chest inside the V-neck opening is expected and desirable — do NOT reject).\n"
+                "4. NEVER reject because of clothing category or subtype naming (polo, t-shirt, knit top, sweatshirt are all valid).\n"
+                f"Context: {catalog_context}.\n"
                 f"{reference_instruction}"
                 f"{'Check both cuffs explicitly. Set shortSleeveConfirmed to true only if both sleeves end above the elbows and there are no fabric strips below either cuff.' if confirm_short_sleeve else ''}\n"
                 "Reply ONLY with a single JSON object:\n"
@@ -154,25 +164,18 @@ class VLMService:
                 '  "passed": true | false,\n'
                 '  "score": float between 0.0 and 1.0,\n'
                 '  "shortSleeveConfirmed": true or false,\n'
-                '  "reason": "short explanation"\n'
+                '  "reason": "short explanation of any visual defect, or concise pass summary"\n'
                 "}\n"
                 "Do not include markdown or explanations. Only raw JSON."
             )
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        *[{"type": "image", "image": img} for img in images],
-                        {"type": "text", "text": prompt},
-                    ],
-                }
-            ]
+            content.append({"type": "text", "text": prompt})
+            messages = [{"role": "user", "content": content}]
             text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             inputs = self.processor(text=[text], images=images, padding=True, return_tensors="pt")
             if torch.cuda.is_available():
                 inputs = {k: v.to("cuda") for k, v in inputs.items()}
             with torch.inference_mode():
-                outputs = model.generate(**inputs, max_new_tokens=100, temperature=0.01)
+                outputs = model.generate(**inputs, max_new_tokens=100, do_sample=False, top_k=None, top_p=None, temperature=None)
             raw = self.processor.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
             match = re.search(r"\{[\s\S]*\}", raw)
             if match:

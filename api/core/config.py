@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     max_image_pixels: int = 60_000_000
     min_image_side: int = 128
     max_variants: int = 8
-    ootd_image_scale: float = Field(default=1.6, ge=0.5, le=5)
+    ootd_image_scale: float = Field(default=2.0, ge=0.5, le=5)
     retention_hours: int = 24
     mock_person_frame: Literal["full_body", "three_quarter", "half_body", "invalid"] = "full_body"
     mock_category: Literal["upper_body", "lower_body", "dress"] = "upper_body"

@@ -30,13 +30,13 @@ class Pipeline:
         self.vlm = VLMService(settings)
         self.ootd = self.ootd_type = self.openpose = self.parsing = None
 
-    def run(self, job: dict) -> dict:
+    def run(self, job: dict, progress_cb=None) -> dict:
         """Chọn tác vụ theo kind; cờ simulated xuyên suốt input/output và job."""
         import json
         payload = json.loads(job["payload"])
         if bool(job["simulated"]) != (self.settings.ai_mode == "mock"):
             raise ServiceError("MODE_MISMATCH", "Job và worker khác chế độ AI; không tự đổi mock/real.", 409)
-        return self.product(payload, job["id"]) if job["kind"] == "PRODUCT_ANALYSIS" else self.tryon(payload, job["id"])
+        return self.product(payload, job["id"]) if job["kind"] == "PRODUCT_ANALYSIS" else self.tryon(payload, job["id"], progress_cb=progress_cb)
 
     def mock_mask(self, image):
         """Mask hình học chỉ để test file/contract, không phải segmentation AI."""
@@ -128,6 +128,9 @@ class Pipeline:
                 # Notebook có thể sửa trousers theo topology; chưa áp dụng âm thầm nếu khác joint category.
                 if consistency.get("trouser_topology_source") == "mask_consensus" and category != "lower_body":
                     raise ServiceError("CATEGORY_REVIEW_REQUIRED", "Mask đa số cho thấy quần; cần duyệt category trước khi công bố.")
+        vlm_attributes = None
+        if not simulated and getattr(self.settings, "enable_vlm", True) and images:
+            vlm_attributes = self.vlm.analyze_garment(images[0])
         variants = []
         for aid, image, mask, label, color, qa in zip(ids, images, masks, labels, colors, quality):
             cutout, asset_mask = self.visual_assets(image, mask, job_id)
@@ -136,6 +139,7 @@ class Pipeline:
                              "DuongDanAnhBocNen": cutout["contentUrl"], "DuongDanMatNaVungThayDo": asset_mask["contentUrl"]})
         return {"productId": payload["productId"], "vtonCategory": category, "variants": variants,
                 "referenceFit": fit, "variantMaskConsistency": consistency, "simulated": simulated,
+                **({"vlmAttributes": vlm_attributes} if vlm_attributes else {}),
                 "warnings": ["MOCK: category, màu, mask và fit chỉ phục vụ kiểm thử."] if simulated else ["Metadata heuristic; chủ shop duyệt trước khi ghi catalog."]}
 
     def load_ootd(self, model_type):
@@ -180,8 +184,10 @@ class Pipeline:
             self.openpose, self.parsing = OpenPose(0), Parsing(0)
             self.openpose.preprocessor.body_estimation.model.to("cuda")
 
-    def tryon(self, payload, job_id):
+    def tryon(self, payload, job_id, progress_cb=None):
         """Validate -> route -> inference -> quality -> lưu ảnh; không publish candidate lỗi."""
+        if progress_cb:
+            progress_cb(8, "VALIDATING", "Đang kiểm tra tư thế và vùng trang phục...")
         raw_person = self.assets.open(payload["personAssetId"], {"person"})
         person = person_rgb(raw_person)
         garment = self.assets.open(payload["garmentAssetId"], {"garment"})
@@ -199,24 +205,27 @@ class Pipeline:
             return {"sessionId": payload["sessionId"], "route": decision, "resultAsset": asset,
                     "simulated": True, "quality": {"evaluated": False},
                     "warnings": ["MOCK: chưa chạy diffusion hoặc đánh giá chất lượng ảnh."]}
-        return self.real_tryon(person, garment, payload, job_id, decision)
+        return self.real_tryon(person, garment, payload, job_id, decision, progress_cb=progress_cb)
 
-    def real_tryon(self, person, garment, payload, job_id, decision):
+    def real_tryon(self, person, garment, payload, job_id, decision, progress_cb=None):
         """Local OOTDiffusion: letterbox/restore và gate từ notebook, serialized trong GPU child."""
         from api.vision import candidate_primitives as q
         import torch
+        def report(pct, stage, msg):
+            if progress_cb:
+                progress_cb(pct, stage, msg)
+        report(12, "PREPROCESSING", "Đang chuẩn bị khung ảnh & nhận diện trang phục...")
         reference_ids = payload.get("referenceAssetIds") or ([payload["referenceAssetId"]] if payload.get("referenceAssetId") else [])
         references = [self.assets.open(reference_id, {"reference"}) for reference_id in reference_ids]
-        catalog_context = " ".join(str(value) for value in (
-            payload.get("vtonCategory"), payload.get("garmentSubtype"), payload.get("catalogFit"), payload.get("catalogLength")
-        ) if value)
         with VISION_LOCK:
             self.vision.load()
-            garment_rgba = garment.convert("RGBA")
-            canvas = Image.new("RGBA", garment_rgba.size, "white")
-            garment = Image.alpha_composite(canvas, garment_rgba).convert("RGB")
-            detection, ref_mask = self.vision.garment(garment, payload["vtonCategory"])
+            garment, garm_bg_rgb, cutout_mask = prepare_garment_canvas(garment)
+            detection, ref_mask = self.vision.garment(garment, payload["vtonCategory"], refine_sam=True)
+            if cutout_mask is not None:
+                ref_mask = cutout_mask
             target = normalize_label(payload.get("garmentSubtype") or detection["label"])
+            is_sleeveless, is_long_sleeve, is_outerwear, has_lapel_v_opening = classify_upper_style(target, payload)
+            catalog_context = format_catalog_context(payload, is_layered_outerwear=has_lapel_v_opening)
             work = self.settings.runtime_dir / "jobs" / job_id
             work.mkdir(parents=True, exist_ok=True)
             source_path = work / "source.png"
@@ -228,10 +237,12 @@ class Pipeline:
             scale = min(768 / gw, 1024 / gh)
             rw, rh = round(gw * scale), round(gh * scale)
             resized_garm = garment.resize((rw, rh), Image.Resampling.LANCZOS)
-            garment_input = Image.new("RGB", (768, 1024), "white")
+            garment_input = Image.new("RGB", (768, 1024), garm_bg_rgb)
             garment_input.paste(resized_garm, ((768 - rw) // 2, (1024 - rh) // 2))
+            report(18, "MODEL_LOADING", "Đang nạp mô hình OOTDiffusion lên GPU...")
             self.load_ootd(decision["modelType"])
             from utils_ootd import get_mask_location
+            report(26, "POSE_AND_MASK", "Đang dò 18 khớp OpenPose & tách mặt nạ trang phục...")
             pose_data = self.vision.primitives.best_pose(prepared)
             if pose_data is None:
                 raise ServiceError("PERSON_FRAME_INVALID", "Không xác định được pose trên ảnh đã chuẩn bị.")
@@ -243,14 +254,8 @@ class Pipeline:
             mask, _ = get_mask_location(decision["modelType"], mask_category, parsed, self.openpose(prepared.resize((384, 512))))
             mask = mask.resize((768, 1024), Image.Resampling.NEAREST)
             source_shirt = np.isin(person_labels, (4, 7))
-            short_shirt = payload["vtonCategory"] == "upper_body" and target == "short_sleeved_shirt"
+            short_shirt = payload["vtonCategory"] == "upper_body" and target == "short_sleeved_shirt" and not is_sleeveless and not is_outerwear
             is_croptop = payload.get("catalogLength") == "AO_CROPTOP" or "crop" in target.lower()
-            is_long_sleeve = (
-                target.startswith("long_sleeved")
-                or payload.get("catalogLength") == "TAY_DAI"
-                or payload.get("garmentLength") == "TAY_DAI"
-                or any(w in target for w in ("hoodie", "sweater", "cardigan", "jacket", "coat", "len", "ni"))
-            )
             keypoints = pose_context.get("keypoints")
             confidences = pose_context.get("confidences")
             torso_h, hip_y = 250.0, 500.0
@@ -265,12 +270,19 @@ class Pipeline:
             hem_factor = 0.16 if fit_setting == "RONG_OVERSIZE" else (0.08 if fit_setting == "OM_SAT" else 0.12)
             target_hem_y = int(hip_y + torso_h * hem_factor)
 
+            long_sleeve_arm_region = None
+            v_inner_mask = None
             if payload["vtonCategory"] == "upper_body" and not is_croptop:
                 if np.any(source_shirt):
                     source_shirt = short_shirt_with_waist_gap(source_shirt, person_labels)
                 mask_np = np.asarray(mask).copy()
                 if np.any(source_shirt):
                     mask_np[source_shirt] = 255
+                    if is_sleeveless:
+                        import cv2
+                        # Giãn vùng xóa lên mép ống tay cũ trên bắp tay để xóa triệt để viền gấu tay áo gốc
+                        sleeve_halo = (cv2.dilate(source_shirt.astype(np.uint8), np.ones((11, 11), np.uint8), iterations=1) > 0) & np.isin(person_labels, (14, 15))
+                        mask_np[sleeve_halo] = 255
                 # Fallback cho mẫu nam cởi trần hoặc mặc đồ lót: dùng pose keypoints phủ toàn bộ thân trên
                 if (not np.any(source_shirt) or np.count_nonzero(mask_np) < 500) and keypoints is not None and len(keypoints) >= 13:
                     if min(confidences[[5, 6, 11, 12]]) >= 0.2:
@@ -295,8 +307,20 @@ class Pipeline:
                         y_col = ys[xs == x]
                         if len(y_col) > 0:
                             y_top = y_col.min()
-                            mask_bottom = min(mask_np.shape[0] - 10, max(y_top + 45, target_hem_y))
+                            mask_bottom = min(mask_np.shape[0] - 10, max(y_top + (35 if fit_setting == "RONG_OVERSIZE" else 22), target_hem_y))
                             mask_np[y_top : mask_bottom, x] = 255
+                if fit_setting != "OM_SAT" or is_long_sleeve or is_outerwear:
+                    mask_np = widen_upper_torso_mask(
+                        mask_np, person_labels, keypoints, confidences, fit_setting, target_hem_y, is_long_sleeve=is_long_sleeve,
+                    )
+                if is_long_sleeve:
+                    mask_np, long_sleeve_arm_region = expand_long_sleeve_arm_mask(
+                        mask_np, person_labels, keypoints, confidences, fit_setting,
+                    )
+                if has_lapel_v_opening and np.any(source_shirt):
+                    v_inner_mask = outerwear_inner_v_mask(person_labels, keypoints, confidences, source_shirt)
+                    if v_inner_mask is not None:
+                        mask_np[v_inner_mask] = 0
                 mask = Image.fromarray(mask_np)
             elif payload["vtonCategory"] == "lower_body":
                 mask_np = np.asarray(mask).copy()
@@ -373,14 +397,20 @@ class Pipeline:
                     mask_np = np.asarray(mask).copy()
                     mask_np[eroded_hands] = 0
                     mask = Image.fromarray(mask_np)
+            total_samples = max(1, int(payload["samples"]))
+            ref_fg_pixels = np.asarray(garment.convert("RGB"))[ref_mask] if np.any(ref_mask) else np.asarray(garment.convert("RGB")).reshape(-1, 3)
+            is_light_garment = float(np.mean(ref_fg_pixels)) >= 185.0 if len(ref_fg_pixels) else False
+            eff_steps = min(30, max(int(payload["steps"]), 24)) if is_light_garment else int(payload["steps"])
+            eff_scale = max(float(self.settings.ootd_image_scale), 2.2) if is_light_garment else float(self.settings.ootd_image_scale)
             def render_candidates():
                 masked_person = Image.composite(gray, prepared, mask)
                 category = {"upper_body": "upperbody", "lower_body": "lowerbody", "dress": "dress"}[payload["vtonCategory"]]
                 for offset in range(payload["samples"]):
+                    report(34 + int(56 * offset / total_samples), "DIFFUSION", f"Đang dựng phối cảnh VTON ({offset + 1}/{total_samples})...")
                     with torch.inference_mode():
                         outputs = self.ootd(model_type=decision["modelType"], category=category,
                                             image_garm=garment_input, image_vton=masked_person, mask=mask, image_ori=prepared,
-                                            num_samples=1, num_steps=payload["steps"], image_scale=self.settings.ootd_image_scale,
+                                            num_samples=1, num_steps=eff_steps, image_scale=eff_scale,
                                             seed=payload["seed"] + offset)
                     yield from outputs
             ref_fit = None
@@ -401,6 +431,10 @@ class Pipeline:
                 except ServiceError:
                     reports.append({"index": index, "passed": False, "reason": "GARMENT_NOT_FOUND"})
                     continue
+                if getattr(self.settings, "enable_sam2", True) and candidate_detection.get("box") is not None:
+                    refined_cand = self.vision.refine_garment_mask_sam(image, candidate_detection["box"], initial_mask=candidate_mask)
+                    if refined_cand is not None:
+                        candidate_mask = refined_cand
                 candidate_mask = candidate_mask.astype(np.uint8) * 255
                 edit = q.visible_edit_mask(np.maximum(np.asarray(mask), candidate_mask), person_silhouette | (candidate_mask > 127))
                 outside = q.change_to_preservation_score(q.outside_garment_change_score(image, prepared, edit))
@@ -411,7 +445,8 @@ class Pipeline:
                 _, body = q.protected_region_artifact_score(image, prepared, protected)
                 limb = q.calculate_limb_integrity_score(candidate_mask, pose_context, target)
                 fit = q.garment_fit_score(candidate_mask, pose_context, payload["vtonCategory"], target)
-                color = q.garment_color_similarity(garment.convert("RGB"), ref_mask.astype(np.uint8) * 255, image, candidate_mask)
+                color_cand_mask = np.where(v_inner_mask, 0, candidate_mask) if v_inner_mask is not None else candidate_mask
+                color = q.garment_color_similarity(garment.convert("RGB"), ref_mask.astype(np.uint8) * 255, image, color_cand_mask)
                 match, _ = q.candidate_match_quality(candidate_detection["label"], target, payload["vtonCategory"])
                 raw_outside = outside
                 raw_match, raw_limb = match, limb
@@ -438,7 +473,16 @@ class Pipeline:
                 if category == "upper_body":
                     import cv2
                     source_top = np.isin(person_labels, (4, 7)) & person_silhouette
-                    clean_edit = np.maximum(candidate_mask, (source_top.astype(np.uint8) * 255))
+                    exposed_arm_mask = None
+                    if is_sleeveless:
+                        image, exposed_arm_mask = q.harmonize_sleeveless_arm_skin(
+                            image, prepared, candidate_mask, person_labels, source_top,
+                        )
+                    shirt_keep = source_top & ~exposed_arm_mask if exposed_arm_mask is not None else source_top
+                    clean_edit = np.maximum(candidate_mask, (shirt_keep.astype(np.uint8) * 255))
+                    if long_sleeve_arm_region is not None:
+                        # Áo dài tay: bảo đảm toàn bộ cánh tay tới cổ tay đều dùng tay áo mới, không lộ viền da cẳng tay gốc
+                        clean_edit = np.maximum(clean_edit, long_sleeve_arm_region)
                     bottoms = np.isin(person_labels, (5, 6))
                     # Nếu áo dáng tiêu chuẩn (không phải croptop) và có quần/đồ lót: phủ clean_edit xuống che kín cạp quần/đồ lót
                     if not is_croptop and np.any(bottoms):
@@ -453,28 +497,23 @@ class Pipeline:
                             if len(b_col) > 0:
                                 y_top_b = b_col.min()
                                 clean_edit[y_top_b : clean_bottom, x] = 255
-                    # Giới hạn viền áo ôm dáng tự nhiên quanh cơ thể người mẫu, không phình to ra nền trống hai bên eo
-                    body_limit = cv2.dilate(person_silhouette.astype(np.uint8), np.ones((21, 21), np.uint8), iterations=1) > 0
+                    # Nối khoảng hở nền dọc giữa eo và cánh tay buông để không khoét rãnh trắng dọc thân áo, vẫn giữ viền ngoài sát dáng người
+                    body_limit = upper_body_limit_mask(person_silhouette)
                     clean_edit[~body_limit] = 0
+                    if v_inner_mask is not None:
+                        clean_edit[v_inner_mask] = 0
                     clean_edit = cv2.GaussianBlur(clean_edit, (0, 0), sigmaX=1.5, sigmaY=1.5)
+                    if exposed_arm_mask is not None:
+                        skin_blend = cv2.GaussianBlur((exposed_arm_mask.astype(np.uint8) * 255), (0, 0), sigmaX=9.0, sigmaY=9.0)
+                        skin_blend[~body_limit] = 0
+                        clean_edit = np.maximum(clean_edit, skin_blend)
                     clean_edit[np.isin(person_labels, (1, 2, 3, 11))] = 0
                     if keypoints is not None and len(keypoints) >= 13 and min(confidences[[11, 12]]) >= 0.2:
                         clean_edit[int(hip_y + torso_h * 0.40):, :] = 0
 
-                        # CHỈ áp dụng cắt chiều dài tay áo lem cho áo cộc tay trên cánh tay (labels 14, 15), TUYỆT ĐỐI không cắt thân áo:
+                        # Chỉ cắt phần vải tay áo tràn xuống cẳng tay dưới (dưới khuỷu tay), giữ trọn dáng tay áo ngắn/rộng tự nhiên
                         if short_shirt and not is_long_sleeve and len(keypoints) >= 9:
-                            target_sleeve_ratio = 0.55
-                            if ref_fit and ref_fit.get("sleeve_ratio") and ref_fit["sleeve_ratio"] < 1.0:
-                                target_sleeve_ratio = min(0.85, ref_fit["sleeve_ratio"])
-                            for s_idx, e_idx, arm_label in ((5, 7, 14), (6, 8, 15)):
-                                if confidences[s_idx] >= 0.2 and confidences[e_idx] >= 0.2:
-                                    sy = keypoints[s_idx, 1]
-                                    ey = keypoints[e_idx, 1]
-                                    sleeve_end_y = int(sy + (ey - sy) * (target_sleeve_ratio + 0.15))
-                                    arm_mask = person_labels == arm_label
-                                    clean_edit[sleeve_end_y:, :] = np.where(
-                                        arm_mask[sleeve_end_y:, :], 0, clean_edit[sleeve_end_y:, :]
-                                    )
+                            clean_edit = trim_short_sleeve_bleed(clean_edit, person_labels, keypoints, confidences, source_top=source_top)
                         elif is_long_sleeve and len(keypoints) >= 11:
                             # Bảo vệ lòng bàn tay và ngón tay không bị lem vải cho áo dài tay
                             for w_idx in (9, 10):
@@ -502,8 +541,24 @@ class Pipeline:
                     outside = 1.0
                 else:
                     composite = q.composite_preserving_source(image, prepared, edit, protected_mask=None)
+                if is_light_garment and category in {"upper_body", "dress"}:
+                    composite = q.harmonize_light_garment_tone(composite, candidate_mask, garment, ref_mask)
 
                 passed = gate_candidate(category, target, outside, body, limb, match)
+                if not passed and category == "upper_body" and match > 0 and outside >= .72:
+                    # Re-check limb integrity after composite trims excess sleeve pixels onto arms
+                    try:
+                        comp_det, comp_mask = self.vision.garment(composite, category)
+                        comp_mask_u8 = comp_mask.astype(np.uint8) * 255
+                        comp_limb = q.calculate_limb_integrity_score(comp_mask_u8, pose_context, target)
+                        comp_match, _ = q.candidate_match_quality(comp_det["label"], target, category)
+                        if gate_candidate(category, target, outside, body, comp_limb, comp_match):
+                            candidate_detection, candidate_mask = comp_det, comp_mask_u8
+                            limb, match = comp_limb, comp_match
+                            fit = q.garment_fit_score(candidate_mask, pose_context, category, target)
+                            passed = True
+                    except ServiceError:
+                        pass
                 reason = None if passed else "QUALITY_THRESHOLDS"
                 if category == "lower_body" and target != "shorts" and payload.get("catalogLength") not in ("NGAN_TREN_GOI", "SHORT"):
                     if lower_fidelity < 0.25:
@@ -528,25 +583,285 @@ class Pipeline:
                         confirm_short_sleeve=False,
                     )
                     if vlm_qa is not None and vlm_qa.get("passed") is False:
-                        passed = False
-                        reason = "VLM_REJECTED"
-                reports.append({"index": index, "passed": passed, "reason": reason, "matchLevel": match, "rawMatchLevel": raw_match, "rawLimb": raw_limb, "rawOutside": raw_outside, "outside": outside, "body": body, "limb": limb, "fit": fit, "color": color, "score": score, "sleeveFidelity": sleeve_fidelity, "lowerFidelity": lower_fidelity})
-                cand_item = (match, score, index, composite, bool(references) and vlm_qa is not None)
+                        vlm_score = vlm_qa.get("score")
+                        if (vlm_score is None or float(vlm_score) < 0.55) and not vlm_category_only_false_positive(vlm_qa, match, limb):
+                            passed = False
+                            reason = "VLM_REJECTED"
+                reports.append({
+                    "index": index, "passed": passed, "reason": reason, "matchLevel": match,
+                    "rawMatchLevel": raw_match, "rawLimb": raw_limb, "rawOutside": raw_outside,
+                    "outside": outside, "body": body, "limb": limb, "fit": fit, "color": color,
+                    "score": score, "sleeveFidelity": sleeve_fidelity, "lowerFidelity": lower_fidelity,
+                    **({"vlmPassed": vlm_qa.get("passed"), "vlmScore": vlm_qa.get("score"), "vlmReason": vlm_qa.get("reason")} if isinstance(vlm_qa, dict) else {}),
+                })
+                vlm_boost = 0.15 * float(vlm_qa["score"]) if isinstance(vlm_qa, dict) and vlm_qa.get("score") is not None else 0.0
+                cand_item = (match, score + vlm_boost, index, composite, bool(references) and vlm_qa is not None)
                 all_rendered.append(cand_item)
                 if passed:
                     candidates.append(cand_item)
+                report(34 + int(56 * (index + 1) / total_samples), "QUALITY_GATE", f"Đang kiểm định chất lượng ({index + 1}/{total_samples})...")
             if not candidates:
-                logger.warning("Không candidate nào đạt hard gate cho %s. Kích hoạt Fallback chọn candidate tốt nhất.", payload["vtonCategory"])
+                logger.warning(
+                    "Không candidate nào đạt hard gate cho %s. Chi tiết: %s. Kích hoạt Fallback chọn candidate tốt nhất.",
+                    payload["vtonCategory"],
+                    [{k: r.get(k) for k in ("index", "reason", "matchLevel", "limb", "outside", "vlmReason")} for r in reports],
+                )
                 valid_pool = [c for c in all_rendered if c[0] > 0]
                 candidates = valid_pool if valid_pool else all_rendered
             if not candidates:
                 raise ServiceError("QUALITY_GATE_FAILED", "Không candidate nào đạt kiểm tra category/tay/chân/vùng ngoài garment.", details={"candidates": reports})
+            report(95, "SAVING", "Đang khôi phục độ phân giải & lưu ảnh kết quả...")
             _, _, selected, result, reference_reviewed = max(candidates, key=lambda item: (item[0], item[1]))
             output = q.restore_oot_result(result, metadata)
             asset = self.assets.save(output, "result", False, job_id)
             return {"sessionId": payload["sessionId"], "route": decision, "resultAsset": asset, "simulated": False,
                     "quality": {"evaluated": True, "selectedIndex": selected, "candidates": reports},
                     "warnings": decision["warnings"], "referenceReviewed": reference_reviewed, "scoringOwner": "Spring Boot"}
+
+
+_VLM_DEFECT_TERMS = (
+    "color", "stain", "gray", "grey", "dark", "patch", "blotch", "halo",
+    "hand", "arm", "limb", "finger", "deform", "pocket", "trouser", "pant",
+    "belt", "text", "split", "artifact", "leftover", "original", "mismatch",
+    "long sleeve", "wrong sleeve", "duplicated sleeve", "collar", "hem",
+    "blur", "distort", "missing", "extra",
+)
+
+
+def vlm_category_only_false_positive(vlm_qa: dict | None, match: int, limb: float) -> bool:
+    """Ignore 4-bit VLM refusals that only dispute taxonomy naming after YOLO+limb already confirmed match."""
+    if not isinstance(vlm_qa, dict) or vlm_qa.get("passed") is not False:
+        return False
+    if match < 2 or limb < 0.8:
+        return False
+    reason = str(vlm_qa.get("reason") or "").lower()
+    if any(term in reason for term in _VLM_DEFECT_TERMS):
+        return False
+    return "does not show" in reason or "not a " in reason or "not show" in reason
+
+
+_SUBTYPE_HINTS = {
+    "short_sleeved_shirt": "short-sleeved top (polo shirt or t-shirt)",
+    "long_sleeved_shirt": "long-sleeved top (shirt, sweater, or hoodie)",
+    "long_sleeved_outwear": "layered outer blazer, cardigan, or jacket",
+    "short_sleeved_outwear": "layered short-sleeved outerwear or jacket",
+    "vest": "sleeveless top, gile, or tank top",
+    "sling": "sleeveless camisole or strap top",
+}
+
+
+def classify_upper_style(target: str, payload: dict) -> tuple[bool, bool, bool, bool]:
+    """Derive (is_sleeveless, is_long_sleeve, is_outerwear, has_lapel_v_opening) from normalized label & catalog metadata."""
+    product_text = str(payload.get("productName") or "").lower()
+    is_sleeveless_tee = any(k in product_text for k in ("khong tay", "không tay", "ba lo", "ba lỗ"))
+    is_sleeveless = target in {"vest", "sling", "vest_dress", "sling_dress"} or "sleeveless" in target or is_sleeveless_tee
+    is_outerwear = (
+        not is_sleeveless_tee
+        and (
+            "outwear" in target
+            or any(k in product_text for k in ("blazer", "cardigan", "gile", "khoác", "khoac", "jacket", "coat", "măng tô", "vest"))
+        )
+    )
+    is_long_sleeve = (
+        not is_sleeveless
+        and (
+            target.startswith("long_sleeved")
+            or payload.get("catalogLength") == "TAY_DAI"
+            or payload.get("garmentLength") == "TAY_DAI"
+            or any(w in target for w in ("hoodie", "sweater", "cardigan", "jacket", "coat", "len", "ni", "outwear"))
+            or ("blazer" in product_text or "cardigan" in product_text)
+        )
+    )
+    has_lapel_v_opening = is_outerwear and not any(k in product_text for k in ("cổ tròn", "co tron", "hoodie"))
+    return is_sleeveless, is_long_sleeve, is_outerwear, has_lapel_v_opening
+
+
+def expand_long_sleeve_arm_mask(mask_np, person_labels, keypoints, confidences, fit_setting=None):
+    """Cover full muscular/outer arm width up to wrist crease so OOTD never locks outer forearm skin strips."""
+    import cv2
+
+    h, w = mask_np.shape[:2]
+    arm_mask = np.zeros((h, w), dtype=np.uint8)
+    arms = np.isin(person_labels, (14, 15))
+    if np.any(arms):
+        arm_mask[arms] = 255
+    torso_h = 240.0
+    if keypoints is not None and len(keypoints) >= 13 and min(confidences[[5, 6, 11, 12]]) >= 0.2:
+        torso_h = max(100.0, float(np.mean(keypoints[[11, 12], 1]) - np.mean(keypoints[[5, 6], 1])))
+    if keypoints is not None and len(keypoints) >= 11:
+        thick = max(34, int(round(torso_h * (0.28 if fit_setting == "RONG_OVERSIZE" else 0.24))))
+        hand_guard = np.zeros((h, w), dtype=bool)
+        for s_idx, e_idx, w_idx in ((5, 7, 9), (6, 8, 10)):
+            pts = [(keypoints[i], confidences[i]) for i in (s_idx, e_idx, w_idx)]
+            if pts[0][1] >= 0.2 and pts[1][1] >= 0.2:
+                s_xy = tuple(np.rint(pts[0][0]).astype(int))
+                e_xy = tuple(np.rint(pts[1][0]).astype(int))
+                cv2.line(arm_mask, s_xy, e_xy, 255, thick)
+                if pts[2][1] >= 0.2:
+                    wx, wy = int(round(pts[2][0][0])), int(round(pts[2][0][1]))
+                    ey_val = int(round(pts[1][0][1]))
+                    cuff_y = wy - 4 if wy > ey_val else wy + 4
+                    cv2.line(arm_mask, e_xy, (wx, cuff_y), 255, thick)
+                    half_hw = max(36, int(round(torso_h * 0.16)))
+                    hand_y1 = max(0, wy + 2) if wy >= ey_val else 0
+                    hand_y2 = h if wy >= ey_val else max(0, wy - 2)
+                    hand_guard[hand_y1:hand_y2, max(0, wx - half_hw) : min(w, wx + half_hw)] = True
+        arm_mask[hand_guard] = 0
+    k = 41 if fit_setting == "RONG_OVERSIZE" else (27 if fit_setting == "OM_SAT" else 35)
+    dilated = cv2.dilate(arm_mask, np.ones((k, k), np.uint8), iterations=1)
+    if np.any(person_labels == 11) or np.any(np.isin(person_labels, (1, 2, 3))):
+        dilated[np.isin(person_labels, (1, 2, 3, 11))] = 0
+    updated = np.maximum(mask_np, dilated)
+    return updated, dilated
+
+
+def widen_upper_torso_mask(mask_np, person_labels, keypoints, confidences, fit_setting, target_hem_y, is_long_sleeve=False):
+    """Bridge pinched waist-to-arm background gaps before diffusion so relaxed/straight tops drape naturally over hips."""
+    import cv2
+
+    if keypoints is None or len(keypoints) < 13 or min(confidences[[5, 6]]) < 0.2:
+        return mask_np
+    h, w = mask_np.shape[:2]
+    sy = float(np.mean(keypoints[[5, 6], 1]))
+    hip_y = float(np.mean(keypoints[[11, 12], 1])) if min(confidences[[11, 12]]) >= 0.2 else sy + 240.0
+    torso_h = max(100.0, hip_y - sy)
+    sx1, sx2 = float(min(keypoints[[5, 6], 0])), float(max(keypoints[[5, 6], 0]))
+    pad_frac = 0.20 if fit_setting == "RONG_OVERSIZE" else 0.12
+    x1 = max(0, int(round(sx1 - torso_h * pad_frac)))
+    x2 = min(w, int(round(sx2 + torso_h * pad_frac)))
+    y1 = max(0, int(round(sy + torso_h * 0.12)))
+    y2 = min(h - 6, max(y1 + 10, int(target_hem_y) + 12))
+    if x2 <= x1 + 10:
+        return mask_np
+
+    band = (mask_np[y1:y2, x1:x2] > 127).astype(np.uint8)
+    closed = cv2.morphologyEx(band, cv2.MORPH_CLOSE, np.ones((15, 75), np.uint8))
+    widened = cv2.dilate(closed, np.ones((9, 23 if fit_setting == "RONG_OVERSIZE" else 15), np.uint8), iterations=1) > 0
+    # Chỉ điền khoảng trống nền (label 0) và vải/quần quanh hông; nếu áo ngắn tay, không xóa vùng cánh tay (14, 15)
+    protect = np.isin(person_labels[y1:y2, x1:x2], (1, 2, 3, 11))
+    if not is_long_sleeve:
+        protect = protect | np.isin(person_labels[y1:y2, x1:x2], (14, 15))
+    out = mask_np.copy()
+    out[y1:y2, x1:x2] = np.where(widened & ~protect, 255, out[y1:y2, x1:x2])
+    return out
+
+
+def outerwear_inner_v_mask(person_labels, keypoints, confidences, source_shirt):
+    """Conservative collarbone-to-sternum V-opening mask that keeps the user's inner shirt visible under blazers/cardigans."""
+    import cv2
+
+    if keypoints is None or len(keypoints) < 13 or min(confidences[[5, 6]]) < 0.2:
+        return None
+    source_bool = np.asarray(source_shirt, dtype=bool)
+    if not np.any(source_bool):
+        return None
+    h, w = person_labels.shape[:2]
+    sy = float(np.mean(keypoints[[5, 6], 1]))
+    hip_y = float(np.mean(keypoints[[11, 12], 1])) if min(confidences[[11, 12]]) >= 0.2 else sy + 240.0
+    torso_h = max(100.0, hip_y - sy)
+    shoulder_span = max(60.0, abs(float(keypoints[6][0] - keypoints[5][0])))
+    cx = float((keypoints[5][0] + keypoints[6][0]) * 0.5)
+    head_xs = np.where(person_labels == 11)[1]
+    if len(head_xs) > 0:
+        cx = float(np.median(head_xs))
+    y_top = max(0, int(round(sy - torso_h * 0.04)))
+    y_bot = min(h - 1, int(round(sy + torso_h * 0.34)))
+    if y_bot <= y_top + 10:
+        return None
+    half_top = max(14.0, shoulder_span * 0.16)
+    half_bot = max(4.0, shoulder_span * 0.03)
+    v_poly = np.array([
+        [cx - half_top, y_top],
+        [cx + half_top, y_top],
+        [cx + half_bot, y_bot],
+        [cx - half_bot, y_bot],
+    ], dtype=np.int32)
+    poly_mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.fillPoly(poly_mask, [v_poly], 255)
+    inner = (poly_mask > 0) & source_bool
+    return inner if np.count_nonzero(inner) >= 120 else None
+
+
+def format_catalog_context(payload: dict, *, is_layered_outerwear: bool = False) -> str:
+    """Translate internal DeepFashion2 labels into neutral descriptions so VLM checks visual fidelity, not taxonomy names."""
+    parts = [
+        payload.get("productName"),
+        payload.get("colorName"),
+        payload.get("vtonCategory"),
+        _SUBTYPE_HINTS.get(str(payload.get("garmentSubtype") or ""), payload.get("garmentSubtype")),
+        payload.get("catalogFit"),
+        payload.get("catalogLength"),
+        "layered buttoned outerwear over user's inner shirt (inner shirt visible at V-neckline is expected)" if is_layered_outerwear else None,
+    ]
+    return " ".join(str(value) for value in parts if value)
+
+
+def trim_short_sleeve_bleed(clean_edit, person_labels, keypoints, confidences, source_top=None):
+    """Trim abnormal bleed only on the distal forearm below the elbow, keeping boxy/drop-shoulder short sleeves intact."""
+    import cv2
+
+    trimmed = clean_edit.copy()
+    torso_keep = np.asarray(source_top, dtype=bool) if source_top is not None else np.zeros_like(trimmed, dtype=bool)
+    for s_idx, e_idx, w_idx, arm_label in ((5, 7, 9, 14), (6, 8, 10, 15)):
+        if confidences[s_idx] >= 0.2 and confidences[e_idx] >= 0.2:
+            sy, ey = keypoints[s_idx, 1], keypoints[e_idx, 1]
+            if len(keypoints) > w_idx and confidences[w_idx] >= 0.2 and keypoints[w_idx, 1] > ey:
+                forearm_cutoff = int(ey + max(18.0, (keypoints[w_idx, 1] - ey) * 0.25))
+            else:
+                forearm_cutoff = int(ey + max(24.0, (ey - sy) * 0.22))
+            if forearm_cutoff >= trimmed.shape[0]:
+                continue
+            arm_band = (person_labels[forearm_cutoff:, :] == arm_label).astype(np.uint8)
+            if not np.any(arm_band):
+                continue
+            # Chỉ bám hẹp quanh cẳng tay (1, 9), tuyệt đối không đục ngang khoảng hở nách/thân áo
+            expanded_arm = (cv2.dilate(arm_band, np.ones((1, 9), np.uint8), iterations=1) > 0) & ~torso_keep[forearm_cutoff:, :]
+            trimmed[forearm_cutoff:, :] = np.where(expanded_arm, 0, trimmed[forearm_cutoff:, :])
+    return trimmed
+
+
+def prepare_garment_canvas(garment: Image.Image) -> tuple[Image.Image, tuple[int, int, int], np.ndarray | None]:
+    """Composite cutout onto pure white with VITON-HD flat-lay padding so tight crops don't distort OOTDiffusion."""
+    rgba = garment.convert("RGBA")
+    arr = np.asarray(rgba).copy()
+    alpha = arr[:, :, 3] > 127
+    has_cutout = bool(0.05 < float(alpha.mean()) < 0.96)
+    bg_rgb = (255, 255, 255)
+    if has_cutout:
+        # Strip anti-aliased dark backdrop halos (e.g. blue table rims) from hard cutouts before compositing onto white
+        if float((arr[:, :, 3] >= 240).mean()) > 0.05:
+            arr[:, :, 3] = np.where(arr[:, :, 3] >= 230, 255, 0)
+            alpha = arr[:, :, 3] > 127
+        ys, xs = np.where(alpha)
+        if len(xs) > 0:
+            x1, y1, x2, y2 = int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+            bw, bh = x2 - x1, y2 - y1
+            h, w = arr.shape[:2]
+            if bw / max(1, w) > 0.78 or bh / max(1, h) > 0.78:
+                # Pad tight cutouts to ~72% occupancy inside a 3:4 portrait canvas matching flat-lay training scale
+                target_h = max(int(round(bh / 0.72)), int(round((bw / 0.72) * 4 / 3)))
+                target_w = max(int(round(bw / 0.72)), int(round(target_h * 3 / 4)))
+                padded = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
+                crop = Image.fromarray(arr[y1:y2, x1:x2], mode="RGBA")
+                ox, oy = (target_w - bw) // 2, (target_h - bh) // 2
+                padded.paste(crop, (ox, oy))
+                rgba = padded
+                alpha = np.asarray(rgba)[:, :, 3] > 127
+            else:
+                rgba = Image.fromarray(arr, mode="RGBA")
+    canvas = Image.new("RGBA", rgba.size, (*bg_rgb, 255))
+    rgb = Image.alpha_composite(canvas, rgba).convert("RGB")
+    return rgb, bg_rgb, (alpha if has_cutout else None)
+
+
+def upper_body_limit_mask(person_silhouette):
+    """Bridge waist-to-arm gaps so wide/relaxed sweaters & blazers never get punched with hip slits."""
+    import cv2
+
+    pad = 48
+    padded = np.pad(np.asarray(person_silhouette, dtype=np.uint8), ((0, 0), (pad, pad)), constant_values=0)
+    bridged = cv2.morphologyEx(padded, cv2.MORPH_CLOSE, np.ones((15, 75), np.uint8))[:, pad:-pad]
+    return cv2.dilate(bridged, np.ones((15, 15), np.uint8), iterations=1) > 0
 
 
 def short_shirt_with_waist_gap(source_shirt, person_labels):

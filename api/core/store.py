@@ -142,7 +142,11 @@ class Store:
         return {"items": [self.public_job(r) for r in rows[offset:offset+limit]], "total": len(rows), "limit": limit, "offset": offset}
 
     def public_job(self, row):
+        done = row["status"] == "COMPLETED"
         return {"jobId": row["id"], "kind": row["kind"], "businessId": row["business_id"], "status": row["status"],
+                "progress": 100 if done else int(row.get("progress") or 0),
+                "stage": row.get("stage") or row["status"],
+                "stageMessage": row.get("stage_message"),
                 "createdAt": row["created_at"], "updatedAt": row["updated_at"], "attempts": row["attempts"],
                 "simulated": bool(row["simulated"]), "result": json.loads(row["result"]) if row["result"] else None,
                 "error": json.loads(row["error"]) if row["error"] else None}
@@ -170,7 +174,8 @@ class Store:
                 raise ServiceError("ASSET_NOT_FOUND", "Ảnh không tồn tại.", 404)
             identifier, timestamp = uuid4().hex, now()
             row = dict(id=identifier, kind=kind, business_id=business_id, payload=encoded, fingerprint=fingerprint,
-                       status="QUEUED", attempts=0, created_at=timestamp, updated_at=timestamp,
+                       status="QUEUED", progress=0, stage="QUEUED", stage_message="Đang xếp hàng chờ GPU...",
+                       attempts=0, created_at=timestamp, updated_at=timestamp,
                        simulated=int(mode == "mock"), result=None, error=None, claim_token=None)
             data["jobs"][identifier] = row
             data["references"][identifier] = sorted(set(asset_ids))
@@ -182,15 +187,27 @@ class Store:
             if not rows:
                 return None
             row = rows[0]
-            row.update(status="PROCESSING", attempts=row["attempts"]+1, updated_at=now(), claim_token=uuid4().hex)
+            row.update(status="PROCESSING", progress=5, stage="VALIDATING", stage_message="Đang kiểm tra tư thế và trang phục...",
+                       attempts=row["attempts"]+1, updated_at=now(), claim_token=uuid4().hex)
         return row
+
+    def progress(self, job_id, *, claim_token, progress, stage, stage_message=None):
+        with self.state() as data:
+            row = data["jobs"].get(job_id)
+            if not row or row["status"] != "PROCESSING" or row["claim_token"] != claim_token:
+                return
+            row.update(progress=max(0, min(99, int(progress))), stage=stage, stage_message=stage_message, updated_at=now())
 
     def finish(self, job_id, *, claim_token, result=None, error=None):
         with self.state() as data:
             row = data["jobs"].get(job_id)
             if not row or row["status"] != "PROCESSING" or row["claim_token"] != claim_token:
                 raise ServiceError("JOB_LEASE_LOST", "Job không còn thuộc lượt xử lý này.", 409)
-            row.update(status="FAILED" if error else "COMPLETED", result=json.dumps(result, allow_nan=False) if result is not None else None,
+            row.update(status="FAILED" if error else "COMPLETED",
+                       progress=row.get("progress", 0) if error else 100,
+                       stage="FAILED" if error else "COMPLETED",
+                       stage_message=None if error else "Hoàn tất thử đồ",
+                       result=json.dumps(result, allow_nan=False) if result is not None else None,
                        error=json.dumps(error) if error else None, updated_at=now(), claim_token=None)
 
     def transition(self, job_id, action, max_queue, max_attempts):

@@ -105,6 +105,9 @@ class JobResponse(DTO):
     kind: str
     business_id: str
     status: Status
+    progress: int = 0
+    stage: str | None = None
+    stage_message: str | None = None
     created_at: str
     updated_at: str
     attempts: int

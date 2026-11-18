@@ -32,14 +32,16 @@ def child_loop(config, connection):
         job = connection.recv()
         if job is None:
             return
+        def on_progress(pct, stage, message=None):
+            connection.send(("PROGRESS", pct, stage, message))
         try:
-            result = pipeline.run(job)
+            result = pipeline.run(job, progress_cb=on_progress)
             # Kiểm tra serialization ngay trong child để parent không chờ vô hạn.
             json.dumps(result, allow_nan=False)
-            connection.send((result, None))
+            connection.send(("DONE", result, None))
         except BaseException as exc:
             LOGGER.exception("job_failed jobId=%s", job["id"])
-            connection.send((None, error_data(exc)))
+            connection.send(("DONE", None, error_data(exc)))
 
 
 @contextmanager
@@ -103,11 +105,15 @@ class Worker:
 
     def execute(self, job):
         """Mock chạy nhẹ trực tiếp; real ở child có giới hạn thời gian ngoài CUDA."""
+        def push_progress(pct, stage, message=None):
+            if job.get("claim_token"):
+                self.store.progress(job["id"], claim_token=job["claim_token"], progress=pct, stage=stage, stage_message=message)
+
         if self.settings.ai_mode == "mock":
             from api.services.pipeline import Pipeline
             if self.pipeline is None:
                 self.pipeline = Pipeline(self.settings)
-            return self.pipeline.run(job)
+            return self.pipeline.run(job, progress_cb=push_progress)
         if self.process is None or not self.process.is_alive():
             self.shutdown_child()
             context = mp.get_context("spawn")
@@ -123,10 +129,17 @@ class Worker:
             self.heartbeat()
             if self.connection.poll(min(1, max(.01, deadline - time.monotonic()))):
                 try:
-                    result, error = self.connection.recv()
+                    msg = self.connection.recv()
                 except EOFError as exc:
                     self.shutdown_child()
                     raise ServiceError("WORKER_PROCESS_DIED", "Tiến trình GPU đã dừng.", 503, retryable=True) from exc
+                if isinstance(msg, tuple) and len(msg) >= 1 and msg[0] == "PROGRESS":
+                    push_progress(msg[1], msg[2], msg[3] if len(msg) > 3 else None)
+                    continue
+                if isinstance(msg, tuple) and len(msg) == 3 and msg[0] == "DONE":
+                    _, result, error = msg
+                else:
+                    result, error = msg
                 if error:
                     raise ServiceError(error["errorCode"], error["message"], details=error.get("details"), retryable=error["retryable"])
                 return result
