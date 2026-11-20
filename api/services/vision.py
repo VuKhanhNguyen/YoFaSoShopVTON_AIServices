@@ -36,6 +36,22 @@ def _normalize_category(cat: str | None) -> str | None:
     return c
 
 
+def _resolve_vision_device(configured: str | None) -> str:
+    """Fallback sang CPU nếu cấu hình CUDA nhưng container/GPU không khởi tạo được CUDA (vd. Error 304)."""
+    target = (configured or "cpu").strip()
+    wants_cuda = target.lower().startswith("cuda") or target.isdigit() or "," in target
+    if not wants_cuda:
+        return target
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return target
+        LOGGER.warning("CUDA không khả dụng cho vision_device=%s (torch.cuda.is_available()=False); tự động chuyển sang cpu.", target)
+    except Exception as exc:
+        LOGGER.warning("Không kiểm tra được CUDA cho vision_device=%s (%s); chuyển sang cpu.", target, exc)
+    return "cpu"
+
+
 class Vision:
     """Giữ một bản model detector trong process; mọi inference được serialize."""
     def __init__(self, settings):
@@ -44,6 +60,7 @@ class Vision:
         self.fashion = self.pose = self.primitives = None
         self.sam = None
         self._sam_attempted = False
+        self._device = "cpu"
 
     def load(self):
         """Không tự tải file theo tên; thiếu checkpoint/dependency báo lỗi rõ."""
@@ -57,11 +74,23 @@ class Vision:
                 from api.vision import product_primitives as primitives
             except ImportError as exc:
                 raise ServiceError("MODEL_DEPENDENCY_MISSING", "Chưa cài thư viện vision trong môi trường đang chạy.", 503) from exc
+            try:
+                import cv2
+                cv2.setNumThreads(1)
+            except Exception:
+                pass
+            try:
+                import torch
+                torch.set_num_threads(1)
+                torch.set_num_interop_threads(1)
+            except Exception:
+                pass
+            self._device = _resolve_vision_device(self.settings.vision_device)
             self.fashion = FashionProxy(YOLO(str(self.settings.deepfashion_weights)))
             self.pose = YOLO(str(self.settings.pose_weights))
             self.primitives = primitives
             primitives.fashion_model, primitives.pose_model = self.fashion, self.pose
-            primitives.DEVICE = self.settings.vision_device
+            primitives.DEVICE = self._device
 
     def load_sam(self):
         """Lazy load SAM 2 (Segment Anything); fallback gracefully nếu thiếu trọng số/ultralytics."""
@@ -91,7 +120,7 @@ class Vision:
             import numpy as np
 
             box_list = [float(v) for v in bbox]
-            device = getattr(self.settings, "vision_device", "cuda")
+            device = self._device or _resolve_vision_device(getattr(self.settings, "vision_device", "cuda"))
             results = sam_model(image, bboxes=[box_list], device=device, verbose=False)
             if results and len(results) > 0 and results[0].masks is not None:
                 sam_mask = results[0].masks.data[0].cpu().numpy().astype(bool)
@@ -141,7 +170,7 @@ class Vision:
             if not wrist_boxes:
                 return None
 
-            device = getattr(self.settings, "vision_device", "cuda")
+            device = self._device or _resolve_vision_device(getattr(self.settings, "vision_device", "cuda"))
             results = sam_model(image, bboxes=wrist_boxes, device=device, verbose=False)
             if not results or len(results) == 0 or results[0].masks is None:
                 return None
@@ -177,22 +206,73 @@ class Vision:
         return {"accepted": True, "personFrame": frame, "simulated": False, "warnings": []}
 
     def garment(self, image, category=None, *, refine_sam: bool = False):
-        """Trả detection+mask thật; category không khớp phải chặn trước diffusion."""
+        """Trả detection+mask thật; tự gộp thân trên + chân váy/quần khi YOLO tách đầm sơ mi hoặc áo dài làm 2 mảnh."""
         with VISION_LOCK:
             self.load()
             rgb = image.convert("RGB")
-            detections = self.primitives.fashion_candidates(rgb)
-            if category:
-                detections = [d for d in detections if category_for(d["label"]) == category]
+            all_detections = self.primitives.fashion_candidates(rgb)
+            detections = [d for d in all_detections if category_for(d["label"]) == category] if category else all_detections
             best = self.primitives.choose_primary_garment(detections)
-            if best is None:
-                raise ServiceError("GARMENT_NOT_FOUND", "Không tìm thấy trang phục đúng vùng yêu cầu.")
-            mask = self.primitives.detection_mask(best, image.size, image=rgb, refine_background=True)
-            if refine_sam and getattr(self.settings, "enable_sam2", True) and best.get("box") is not None:
-                refined = self.refine_garment_mask_sam(rgb, best.get("box"), initial_mask=mask)
-                if refined is not None:
-                    mask = refined
-        return best, mask
+            if best is not None:
+                mask = self.primitives.detection_mask(best, image.size, image=rgb, refine_background=True)
+                if refine_sam and getattr(self.settings, "enable_sam2", True) and best.get("box") is not None:
+                    refined = self.refine_garment_mask_sam(rgb, best.get("box"), initial_mask=mask)
+                    if refined is not None:
+                        mask = refined
+                if category == "dress" and best.get("box") is not None:
+                    # Áo dài / bộ đầm kèm quần lụa: DeepFashion2 tách riêng tà áo dài (dress) và quần ống rộng (trousers)
+                    import numpy as np
+                    bx1, by1, bx2, by2 = [float(v) for v in best["box"]]
+                    bh = max(1.0, by2 - by1)
+                    companion_trousers = [
+                        d for d in all_detections
+                        if d.get("label") == "trousers" and d.get("box") is not None
+                        and float(d["box"][1]) >= by1 + 0.25 * bh
+                        and min(bx2, float(d["box"][2])) > max(bx1, float(d["box"][0]))
+                    ]
+                    best_trousers = self.primitives.choose_primary_garment(companion_trousers)
+                    if best_trousers is not None:
+                        t_mask = self.primitives.detection_mask(best_trousers, image.size, image=rgb, refine_background=True)
+                        if refine_sam and getattr(self.settings, "enable_sam2", True):
+                            t_ref = self.refine_garment_mask_sam(rgb, best_trousers.get("box"), initial_mask=t_mask)
+                            if t_ref is not None:
+                                t_mask = t_ref
+                        mask = np.logical_or(mask, t_mask)
+                        tx1, ty1, tx2, ty2 = [float(v) for v in best_trousers["box"]]
+                        best = {
+                            **best,
+                            "box": np.array([min(bx1, tx1), min(by1, ty1), max(bx2, tx2), max(by2, ty2)], dtype=float),
+                            "area_ratio": float(mask.mean()),
+                            "merged_companion": "trousers",
+                        }
+                return best, mask
+            if category == "dress" and all_detections:
+                # Đầm sơ mi (cổ đức + tà xòe), đầm xếp tầng hoặc áo dài thường bị DeepFashion2 tách thành áo + váy/quần
+                import numpy as np
+                uppers = [d for d in all_detections if category_for(d["label"]) == "upper_body"]
+                lowers = [d for d in all_detections if d["label"] in {"skirt", "trousers"}]
+                best_up = self.primitives.choose_primary_garment(uppers)
+                best_low = self.primitives.choose_primary_garment(lowers)
+                parts = [p for p in (best_up, best_low) if p is not None]
+                if parts and (len(parts) == 2 or float(parts[0].get("area_ratio", 0.0)) >= 0.12):
+                    masks = [self.primitives.detection_mask(p, image.size, image=rgb, refine_background=False) for p in parts]
+                    merged_mask = np.logical_or.reduce(masks)
+                    boxes = np.array([p["box"] for p in parts], dtype=float)
+                    merged_box = np.array([boxes[:, 0].min(), boxes[:, 1].min(), boxes[:, 2].max(), boxes[:, 3].max()], dtype=float)
+                    promoted_label = self.primitives.promote_label_to_family(best_up["label"], "dress") if best_up else "short_sleeved_dress"
+                    synthetic = {
+                        "label": promoted_label or "short_sleeved_dress",
+                        "confidence": float(min(p.get("confidence", 0.5) for p in parts)),
+                        "area_ratio": float(merged_mask.mean()),
+                        "box": merged_box,
+                        "merged_from": [p["label"] for p in parts],
+                    }
+                    if refine_sam and getattr(self.settings, "enable_sam2", True):
+                        refined = self.refine_garment_mask_sam(rgb, merged_box, initial_mask=merged_mask)
+                        if refined is not None:
+                            merged_mask = refined
+                    return synthetic, merged_mask
+            raise ServiceError("GARMENT_NOT_FOUND", "Không tìm thấy trang phục đúng vùng yêu cầu.")
 
     def analyze_garment_color(self, image):
         """Nhận diện màu trang phục bằng DeepFashion2 + SAM2 / K-Means palette."""

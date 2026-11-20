@@ -174,7 +174,7 @@ class Store:
                 raise ServiceError("ASSET_NOT_FOUND", "Ảnh không tồn tại.", 404)
             identifier, timestamp = uuid4().hex, now()
             row = dict(id=identifier, kind=kind, business_id=business_id, payload=encoded, fingerprint=fingerprint,
-                       status="QUEUED", progress=0, stage="QUEUED", stage_message="Đang xếp hàng chờ GPU...",
+                       status="QUEUED", progress=0, stage="QUEUED", stage_message="Đang xếp hàng chờ xử lý...",
                        attempts=0, created_at=timestamp, updated_at=timestamp,
                        simulated=int(mode == "mock"), result=None, error=None, claim_token=None)
             data["jobs"][identifier] = row
@@ -187,7 +187,7 @@ class Store:
             if not rows:
                 return None
             row = rows[0]
-            row.update(status="PROCESSING", progress=5, stage="VALIDATING", stage_message="Đang kiểm tra tư thế và trang phục...",
+            row.update(status="PROCESSING", progress=5, stage="VALIDATING", stage_message="YOLO26-Pose đang kiểm tra tư thế...",
                        attempts=row["attempts"]+1, updated_at=now(), claim_token=uuid4().hex)
         return row
 

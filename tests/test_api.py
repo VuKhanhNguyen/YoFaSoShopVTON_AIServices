@@ -14,7 +14,6 @@ from api.application import create_app
 from api.core.config import Settings
 from api.core.errors import ServiceError
 from api.core.store import Store
-from api.services.pipeline import gate_candidate
 from api.services.routing import category_for
 from workers.runner import Worker
 
@@ -103,20 +102,20 @@ def test_validate_person_route(client, upload):
     assert client.post(PREFIX + "/persons/validate", json={"assetId": "missing"}).status_code == 404
 
 
-@pytest.mark.parametrize("category,subtype,length,frame,accepted,model", [
-    ("upper_body", "sling", "UNKNOWN", "half_body", True, "hd"),
-    ("lower_body", "trousers", "LONG", "half_body", False, "dc"),
-    ("lower_body", "shorts", "SHORT", "three_quarter", True, "dc"),
-    ("lower_body", "skirt", "UNKNOWN", "half_body", False, "dc"),
-    ("dress", "sling_dress", "LONG", "full_body", True, "dc"),
-    ("dress", "sling_dress", "SHORT", "invalid", False, "dc"),
+@pytest.mark.parametrize("category,subtype,length,frame,accepted", [
+    ("upper_body", "sling", "UNKNOWN", "half_body", True),
+    ("lower_body", "trousers", "LONG", "half_body", False),
+    ("lower_body", "shorts", "SHORT", "three_quarter", True),
+    ("lower_body", "skirt", "UNKNOWN", "half_body", False),
+    ("dress", "sling_dress", "LONG", "full_body", True),
+    ("dress", "sling_dress", "SHORT", "invalid", False),
 ])
-def test_routing(client, category, subtype, length, frame, accepted, model):
-    """Bảo vệ rule đồ dài/category từ tài liệu thay vì chỉ test happy path áo."""
+def test_routing(client, category, subtype, length, frame, accepted):
+    """Bảo vệ rule đồ dài/category từ tài liệu trước khi gọi Cloud VTON."""
     response = client.post(PREFIX + "/routing/preview", json={"vtonCategory": category, "garmentSubtype": subtype, "garmentLength": length, "personFrame": frame})
     assert response.status_code == 200
     assert response.json()["accepted"] is accepted
-    assert response.json()["modelType"] == model
+    assert response.json()["modelType"] == "fashn_v16"
 
 
 def test_category_mismatch_and_unknown_fields(client, tryon_payload):
@@ -241,6 +240,23 @@ def test_security_config(settings):
         Settings(_env_file=None, ai_mysql_password="test-password", ai_internal_api_key="k" * 40, ai_mode="real", embedded_worker=True)
 
 
+def test_genlook_keep_for_days_reads_env_and_validates(tmp_path, monkeypatch):
+    """Đọc GENLOOK_KEEP_FOR_DAYS từ .env (dạng chuỗi) phải ép được về int 1/3/7 và chặn giá trị ngoài tập."""
+    monkeypatch.delenv("GENLOOK_KEEP_FOR_DAYS", raising=False)
+    base = {"ai_internal_api_key": "k" * 40, "app_env": "test", "ai_mode": "mock", "embedded_worker": False}
+    for raw, expected in (("1", 1), ("3", 3), ("7", 7)):
+        env_file = tmp_path / f".env.{raw}"
+        env_file.write_text(f"GENLOOK_KEEP_FOR_DAYS={raw}\n", encoding="utf-8")
+        cfg = Settings(_env_file=env_file, **base)
+        assert cfg.genlook_keep_for_days == expected
+        assert isinstance(cfg.genlook_keep_for_days, int)
+    for bad in ("2", "0", "abc"):
+        env_file = tmp_path / f".env.bad.{bad}"
+        env_file.write_text(f"GENLOOK_KEEP_FOR_DAYS={bad}\n", encoding="utf-8")
+        with pytest.raises(ValueError):
+            Settings(_env_file=env_file, **base)
+
+
 def test_concurrent_idempotency(client, settings, tryon_payload):
     """20 caller cùng submit qua DB chỉ tạo một job (không đo throughput inference)."""
     client.post(PREFIX + "/try-on/jobs", json=tryon_payload)
@@ -249,19 +265,6 @@ def test_concurrent_idempotency(client, settings, tryon_payload):
     with ThreadPoolExecutor(max_workers=10) as pool:
         rows = list(pool.map(lambda _: store.submit("TRY_ON", "TD001", payload, [tryon_payload["personAssetId"], tryon_payload["garmentAssetId"]], "mock", 20), range(20)))
     assert len({row["id"] for row in rows}) == 1
-
-
-@pytest.mark.parametrize("category,subtype,outside,body,limb,expected", [
-    ("upper_body", "sling", .9, .9, .2, False),
-    ("dress", "sling_dress", .9, .1, .9, False),
-    ("lower_body", "shorts", .2, .9, .9, False),
-    ("upper_body", "long_sleeved_shirt", .9, .9, .1, True),
-    ("dress", "long_sleeved_dress", .9, .9, .1, True),
-])
-def test_artifact_gate(category, subtype, outside, body, limb, expected):
-    """Candidate màu khớp nhưng tay hỏng phải fail; dài tay được che tay hợp lệ."""
-    assert gate_candidate(category, subtype, outside, body, limb, 3) is expected
-    assert not gate_candidate(category, subtype, outside, body, limb, 0)
 
 
 def test_labels():

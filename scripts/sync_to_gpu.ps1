@@ -1,7 +1,7 @@
 # ==============================================================================
 # YoFaSoShop_AIService - Script dong bo code tu Laptop len GPU ao qua SSH/SCP
 # Chi dong bo code Python (api/core, api/services, api/vision, workers, scripts)
-# TUYET DOI KHONG dong bo api/models/, weights/, .venv/, __pycache__/
+# va cac file cu the trong $modelFiles (KHONG dong bo ca api/models/, weights/)
 # ==============================================================================
 param(
     [switch]$Watch
@@ -36,6 +36,9 @@ $remoteDest = "$sshUser@$sshHost"
 $remoteAppDir = "/workspace/YoFaSoShop_AIService"
 $sshKeyArgs = if (-not [string]::IsNullOrWhiteSpace($sshKey)) { @('-i', $sshKey) } else { @() }
 
+# Danh sach file cu the trong api/models/ can dong bo (KHONG dong bo OOTDiffusion)
+$modelFiles = @()
+
 Write-Host "=================================================================" -ForegroundColor Cyan
 Write-Host "DONG BO CODE YO FASO SHOP AI SERVICE -> GPU CLOUD" -ForegroundColor Cyan
 Write-Host "Dich den: $remoteDest`:$remoteAppDir (Port: $sshPort)" -ForegroundColor Yellow
@@ -44,7 +47,26 @@ Write-Host "=================================================================" -
 function Sync-CodeFiles {
     Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Dang dong bo code Python (loai tru models/weights)..." -ForegroundColor Green
 
-    $mkdirCmd = "mkdir -p $remoteAppDir/api/core $remoteAppDir/api/services $remoteAppDir/api/vision $remoteAppDir/api/models $remoteAppDir/workers $remoteAppDir/scripts $remoteAppDir/weights"
+    $remoteDirs = @(
+        "$remoteAppDir/api/core",
+        "$remoteAppDir/api/services",
+        "$remoteAppDir/api/vision",
+        "$remoteAppDir/api/models",
+        "$remoteAppDir/workers",
+        "$remoteAppDir/scripts",
+        "$remoteAppDir/weights"
+    )
+    if ($modelFiles -and ($modelFiles.Count -gt 0)) {
+        foreach ($relPath in $modelFiles) {
+            $normalized = ($relPath -replace '\\', '/').TrimStart('/')
+            $parentDir = (Split-Path -Parent $normalized) -replace '\\', '/'
+            if ($parentDir) {
+                $remoteDirs += "$remoteAppDir/$parentDir"
+            }
+        }
+    }
+    $quotedDirs = ($remoteDirs | Select-Object -Unique) | ForEach-Object { "'$_'" }
+    $mkdirCmd = "mkdir -p " + ($quotedDirs -join ' ')
     & ssh @sshKeyArgs -p $sshPort $remoteDest $mkdirCmd
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Khong the ket noi SSH toi $remoteDest`:$sshPort"
@@ -59,8 +81,18 @@ function Sync-CodeFiles {
     }
     & scp @sshKeyArgs -P $sshPort "$serviceRoot/requirements-api.txt" "$serviceRoot/requirements-gpu.txt" "$serviceRoot/.env.example" "$serviceRoot/pyproject.toml" "$remoteDest`:$remoteAppDir/"
     if ($LASTEXITCODE -ne 0) { throw "SCP that bai khi dong bo cau hinh mau." }
-    
-    if ($LASTEXITCODE -ne 0) { throw "SCP that bai khi dong bo nen phong VTON." }
+
+    if ($modelFiles -and ($modelFiles.Count -gt 0)) {
+        foreach ($relPath in $modelFiles) {
+            $normalized = ($relPath -replace '\\', '/').TrimStart('/')
+            $localFile = Join-Path $serviceRoot $normalized
+            if (-not (Test-Path -LiteralPath $localFile -PathType Leaf)) {
+                throw "Khong tim thay file trong `$modelFiles: $localFile"
+            }
+            & scp @sshKeyArgs -P $sshPort $localFile "$remoteDest`:$remoteAppDir/$normalized"
+            if ($LASTEXITCODE -ne 0) { throw "SCP that bai khi dong bo $normalized." }
+        }
+    }
 
     Write-Host "Da chep code. Cho job dang chay ket thuc, sau do khoi dong lai python -m workers.runner de nap code moi." -ForegroundColor Yellow
 }
@@ -75,7 +107,15 @@ if ($Watch) {
         $changed = Get-ChildItem -Path "$serviceRoot/api/core", "$serviceRoot/api/services", "$serviceRoot/api/vision", "$serviceRoot/workers", "$serviceRoot/scripts" -Filter "*.py" |
                    Where-Object { $_.LastWriteTime -gt $lastTime }
         $rootChanged = Get-ChildItem -Path "$serviceRoot/api/*.py" | Where-Object { $_.LastWriteTime -gt $lastTime }
-        $allChanged = @($changed) + @($rootChanged)
+        $modelChanged = @(
+            foreach ($relPath in $modelFiles) {
+                $localFile = Join-Path $serviceRoot (($relPath -replace '\\', '/').TrimStart('/'))
+                if (Test-Path -LiteralPath $localFile -PathType Leaf) {
+                    Get-Item -LiteralPath $localFile | Where-Object { $_.LastWriteTime -gt $lastTime }
+                }
+            }
+        )
+        $allChanged = @($changed) + @($rootChanged) + $modelChanged
         if ($allChanged.Count -gt 0) {
             $lastTime = Get-Date
             Write-Host "Phat hien thay doi tai: $($allChanged.Name -join ', ')" -ForegroundColor Yellow

@@ -6,7 +6,6 @@ services:
     env_file: .env
     environment:
       RUNTIME_DIR: /app/data/runtime
-      OOTD_ROOT: /app/api/models/ootdiffusion
       DEEPFASHION_WEIGHTS: /app/weights/deepfashion2_yolov8s-seg.pt
       POSE_WEIGHTS: /app/weights/yolo26s-pose.pt
     ports:
@@ -14,7 +13,6 @@ services:
     volumes:
       - "${HOST_RUNTIME_DIR:-./data/runtime}:/app/data/runtime"
       - "${HOST_WEIGHTS_DIR:-./weights}:/app/weights:ro"
-      - "${HOST_OOTD_DIR:-./api/models/ootdiffusion}:/app/api/models/ootdiffusion:ro"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=3)"]
@@ -31,14 +29,12 @@ services:
       AI_MODE: real
       EMBEDDED_WORKER: "false"
       RUNTIME_DIR: /app/data/runtime
-      OOTD_ROOT: /app/api/models/ootdiffusion
       DEEPFASHION_WEIGHTS: /app/weights/deepfashion2_yolov8s-seg.pt
       POSE_WEIGHTS: /app/weights/yolo26s-pose.pt
       HF_HOME: /app/.cache/huggingface
     volumes:
       - "${HOST_RUNTIME_DIR:-./data/runtime}:/app/data/runtime"
       - "${HOST_WEIGHTS_DIR:-./weights}:/app/weights:ro"
-      - "${HOST_OOTD_DIR:-./api/models/ootdiffusion}:/app/api/models/ootdiffusion:ro"
       - "${HOST_HF_CACHE_DIR:-./.cache/huggingface}:/app/.cache/huggingface"
     deploy:
       resources:

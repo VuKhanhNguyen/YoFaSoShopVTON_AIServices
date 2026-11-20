@@ -158,33 +158,60 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/health/ready", tags=["Health"], responses={503: {"model": ErrorResponse}})
     def ready():
-        """Queue storage + heartbeat + file checkpoint; chưa thay inference nghiệm thu."""
+        """Queue storage + heartbeat + vision weights + VTON API key (không cần OOTDiffusion)."""
         heartbeat = store.heartbeat()
         worker_ready = bool(heartbeat and heartbeat["heartbeat"] is not None and heartbeat["mode"] == settings.ai_mode and time.time() - heartbeat["heartbeat"] < settings.worker_lease_seconds)
-        files_ready = settings.ai_mode == "mock" or all(p.is_file() for p in (settings.deepfashion_weights, settings.pose_weights, settings.ootd_root / "checkpoints/ootd/model_index.json"))
+        files_ready = settings.ai_mode == "mock" or (
+            settings.deepfashion_weights.is_file()
+            and settings.pose_weights.is_file()
+            and settings.has_vton_credentials()
+        )
         if not worker_ready or not files_ready:
-            raise ServiceError("SERVICE_NOT_READY", "Worker chưa sẵn sàng hoặc thiếu checkpoint.", 503)
-        return {"status": "ready", "simulated": settings.ai_mode == "mock", "inferenceVerified": False}
+            raise ServiceError("SERVICE_NOT_READY", "Worker chưa sẵn sàng, thiếu trọng số vision hoặc thiếu API key cho VTON_PROVIDER.", 503)
+        return {"status": "ready", "simulated": settings.ai_mode == "mock", "vtonProvider": settings.vton_provider, "inferenceVerified": False}
 
     @router.get("/config-check", tags=["System"])
     def config_check():
         """Kiểm tra cấu hình không lộ secret hoặc absolute path."""
-        return {"env": settings.app_env, "mode": settings.ai_mode, "simulated": settings.ai_mode == "mock", "queueBackend": "file-manifest", "vtonReady": False}
+        return {
+            "env": settings.app_env,
+            "mode": settings.ai_mode,
+            "simulated": settings.ai_mode == "mock",
+            "queueBackend": "file-manifest",
+            "vtonProvider": settings.vton_provider,
+            "vtonReady": settings.ai_mode == "mock" or settings.has_vton_credentials(),
+            "fashnMode": settings.fashn_mode,
+            "fashnGarmentPhotoType": settings.fashn_garment_photo_type,
+            "genlookCrop": settings.genlook_crop,
+            "genlookResolution": settings.genlook_resolution,
+        }
 
     @router.get("/capabilities", tags=["System"])
     def capabilities():
         """Liệt kê phạm vi AI, category và giới hạn để BE xây form phù hợp."""
-        return {"apiVersion": "1.0.0", "mode": settings.ai_mode, "simulated": settings.ai_mode == "mock",
-                "categories": ["upper_body", "lower_body", "dress"], "subtypes": sorted(UPPER | LOWER | DRESSES),
-                "queueBackend": "file-manifest", "scoringOwner": "Spring Boot", "maxUploadBytes": settings.max_upload_bytes,
-                "maxVariants": settings.max_variants, "maxSamples": 4}
+        return {
+            "apiVersion": "1.0.0", "mode": settings.ai_mode, "simulated": settings.ai_mode == "mock",
+            "vtonProvider": settings.vton_provider,
+            "categories": ["upper_body", "lower_body", "dress"], "subtypes": sorted(UPPER | LOWER | DRESSES),
+            "queueBackend": "file-manifest", "scoringOwner": "Spring Boot", "maxUploadBytes": settings.max_upload_bytes,
+            "maxVariants": settings.max_variants, "maxSamples": 4,
+        }
 
     @router.get("/models", tags=["System"])
     def models():
-        """Kiểm tra file local, không tải model và không tuyên bố inference thành công."""
-        return {"mode": settings.ai_mode, "models": [{"name": name, "present": path.is_file()} for name, path in (
-            ("DeepFashion2", settings.deepfashion_weights), ("YOLO Pose", settings.pose_weights),
-            ("OOTDiffusion", settings.ootd_root / "checkpoints/ootd/model_index.json"))], "inferenceVerified": False}
+        """Kiểm tra file local và trạng thái cấu hình Cloud VTON, không lộ khóa."""
+        return {
+            "mode": settings.ai_mode,
+            "vtonProvider": settings.vton_provider,
+            "models": [
+                {"name": "DeepFashion2", "present": settings.deepfashion_weights.is_file()},
+                {"name": "YOLO Pose", "present": settings.pose_weights.is_file()},
+                {"name": "SAM 2.1 Large", "present": settings.sam2_weights.is_file()},
+                {"name": "Qwen3-VL-4B (Admin)", "present": settings.vlm_model_dir.is_dir()},
+                {"name": f"Cloud VTON ({settings.vton_provider})", "present": settings.has_vton_credentials()},
+            ],
+            "inferenceVerified": False,
+        }
 
     @router.post("/assets", response_model=AssetResponse, status_code=201, tags=["Assets"])
     async def upload_asset(file: UploadFile = File(...), role: Literal["person", "garment", "reference"] = Form(...)):
@@ -220,14 +247,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         image = assets.open(body.asset_id, {"person", "reference"})
         result = vision.validate_person(person_rgb(image))
         if body.vton_category:
-            result["route"] = route(body.vton_category, result["personFrame"], body.garment_subtype, body.garment_length)
+            result["route"] = route(body.vton_category, result["personFrame"], body.garment_subtype, body.garment_length, provider=settings.vton_provider)
             result["accepted"] = result["accepted"] and result["route"]["accepted"]
         return result
 
     @router.post("/routing/preview", tags=["Vision"])
     def routing_preview(body: RouteRequest):
         """Rule thuần, không tốn GPU; frame nhập tay không thay validation ảnh thật."""
-        return route(body.vton_category, body.person_frame, body.garment_subtype, body.garment_length)
+        return route(body.vton_category, body.person_frame, body.garment_subtype, body.garment_length, provider=settings.vton_provider)
 
     @router.post("/garments/analyze-color", tags=["Vision"])
     async def analyze_garment_color(
@@ -328,7 +355,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         validate_assets([body.garment_asset_id], {"garment"})
         references = body.reference_asset_ids or ([body.reference_asset_id] if body.reference_asset_id else [])
         validate_assets(references, {"reference"})
-        route(body.vton_category, "full_body", body.garment_subtype, body.garment_length)
+        route(body.vton_category, "full_body", body.garment_subtype, body.garment_length, provider=settings.vton_provider)
         payload = body.model_dump(by_alias=True)
         return store.public_job(store.submit("TRY_ON", body.session_id, payload, [body.person_asset_id, body.garment_asset_id, *references], settings.ai_mode, settings.max_queue_size))
 

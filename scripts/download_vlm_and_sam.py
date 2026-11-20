@@ -1,8 +1,7 @@
-"""Download official checkpoints for SAM 2 and VLM (Qwen2-VL / Florence-2).
+"""Download official checkpoints for SAM 2.1 Large and VLM (Qwen3-VL-4B-Instruct / Florence-2).
 
-Following GPU.md and VLM_and_SAM.md architecture specifications.
-- SAM 2 weights are placed in `weights/sam2/` or `weights/`
-- VLM model repositories are placed in `api/models/vlm/`
+- SAM 2.1 weights are placed in `weights/sam2/` (mặc định chỉ tải `sam2.1_l.pt` ~428 MB)
+- VLM model repositories are placed in `api/models/vlm/` (mặc định `Qwen/Qwen3-VL-4B-Instruct` ~8.5 GB BF16)
 """
 from __future__ import annotations
 
@@ -16,15 +15,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-MIN_FREE_GIB = 12
+MIN_FREE_GIB = 15
 
-# Official Checkpoint Sources
+# Official Checkpoint Sources (Ultralytics v8.3.0 & Meta)
 SAM_URLS = {
-    # Ultralytics optimized single-file weights (Standard & recommended for inference)
-    "sam2_b": "https://github.com/ultralytics/assets/releases/download/v8.3.0/sam2_b.pt",
-    "sam2_t": "https://github.com/ultralytics/assets/releases/download/v8.3.0/sam2_t.pt",
+    "sam2.1_l": "https://github.com/ultralytics/assets/releases/download/v8.3.0/sam2.1_l.pt",
     "sam2.1_b": "https://github.com/ultralytics/assets/releases/download/v8.3.0/sam2.1_b.pt",
     "sam2.1_t": "https://github.com/ultralytics/assets/releases/download/v8.3.0/sam2.1_t.pt",
+    "sam2_b": "https://github.com/ultralytics/assets/releases/download/v8.3.0/sam2_b.pt",
+    "sam2_t": "https://github.com/ultralytics/assets/releases/download/v8.3.0/sam2_t.pt",
     # Meta official research checkpoints
     "meta_sam2.1_base_plus": "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_base_plus.pt",
     "meta_sam2.1_tiny": "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_tiny.pt",
@@ -32,9 +31,9 @@ SAM_URLS = {
 
 VLM_REPOS = {
     "qwen": {
-        "repo_id": "Qwen/Qwen2-VL-2B-Instruct",
-        "description": "Alibaba Qwen2-VL-2B-Instruct (Vision-Language model ~4.5 GB)",
-        "folder": "Qwen2-VL-2B-Instruct",
+        "repo_id": "Qwen/Qwen3-VL-4B-Instruct",
+        "description": "Alibaba Qwen3-VL-4B-Instruct (BF16 Vision-Language model ~8.5 GB)",
+        "folder": "Qwen3-VL-4B-Instruct",
     },
     "florence": {
         "repo_id": "microsoft/Florence-2-base",
@@ -54,25 +53,25 @@ def configure_console() -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Tải tự động checkpoint chính thức cho SAM 2 và VLM (Qwen2-VL / Florence-2)."
+        description="Tải tự động checkpoint chính thức cho SAM 2.1 Large và VLM (Qwen3-VL-4B-Instruct)."
     )
     parser.add_argument(
         "--sam-variant",
-        choices=["default", "tiny-only", "base-only", "all-ultralytics", "meta-official", "skip"],
+        choices=["default", "large-only", "base-only", "tiny-only", "all-ultralytics", "meta-official", "skip"],
         default="default",
-        help="Lựa chọn biến thể SAM 2 cần tải (default: sam2_b + sam2_t).",
+        help="Lựa chọn biến thể SAM 2.1 cần tải (default: sam2.1_l.pt ~428 MB).",
     )
     parser.add_argument(
         "--vlm-model",
         choices=["qwen", "florence", "both", "skip"],
         default="qwen",
-        help="Lựa chọn VLM cần tải (default: Qwen2-VL-2B-Instruct).",
+        help="Lựa chọn VLM cần tải (default: Qwen/Qwen3-VL-4B-Instruct).",
     )
     parser.add_argument(
         "--sam-dir",
         type=Path,
         default=ROOT / "weights" / "sam2",
-        help="Thư mục đích lưu trọng số SAM 2 (mặc định: weights/sam2/).",
+        help="Thư mục đích lưu trọng số SAM 2.1 (mặc định: weights/sam2/).",
     )
     parser.add_argument(
         "--vlm-dir",
@@ -139,11 +138,11 @@ def download_file_with_progress(url: str, dest_path: Path) -> None:
 
 
 def download_hf_repo(repo_id: str, local_dir: Path, hf_token: str | None = None) -> None:
-    """Download a full model snapshot from Hugging Face Hub."""
+    """Download a full model snapshot directly into local_dir (không nhân đôi bản sao trong HF cache)."""
     try:
         from huggingface_hub import snapshot_download
     except ImportError:
-        raise RuntimeError("Cần cài huggingface-hub: pip install huggingface-hub>=0.25.0")
+        raise RuntimeError("Cần cài huggingface-hub: pip install huggingface-hub>=0.25.2")
 
     print(f"  [HUGGINGFACE] Bắt đầu tải snapshot {repo_id}...")
     local_dir.mkdir(parents=True, exist_ok=True)
@@ -164,9 +163,9 @@ def main() -> int:
     vlm_dir = args.vlm_dir.expanduser().resolve()
 
     print("=" * 76)
-    print("YoFaSoShop_AIService · Trình tải tự động mô hình SAM 2 và VLM")
-    print(f"SAM 2 Target: {sam_dir}")
-    print(f"VLM Target  : {vlm_dir}")
+    print("YoFaSoShop_AIService · Trình tải tự động SAM 2.1 Large & Qwen3-VL-4B (BF16)")
+    print(f"SAM 2.1 Target: {sam_dir}")
+    print(f"VLM Target    : {vlm_dir}")
     print("=" * 76)
 
     # 1. Kiểm tra dung lượng đĩa
@@ -179,21 +178,17 @@ def main() -> int:
         )
         return 2
 
-    # 2. Xác định danh sách file SAM 2 cần tải
+    # 2. Xác định danh sách file SAM 2.1 cần tải
     sam_targets: list[tuple[str, Path]] = []
-    if args.sam_variant == "default":
-        sam_targets = [
-            (SAM_URLS["sam2_b"], sam_dir / "sam2_b.pt"),
-            (SAM_URLS["sam2_t"], sam_dir / "sam2_t.pt"),
-        ]
-    elif args.sam_variant == "tiny-only":
-        sam_targets = [(SAM_URLS["sam2_t"], sam_dir / "sam2_t.pt")]
+    if args.sam_variant in ("default", "large-only"):
+        sam_targets = [(SAM_URLS["sam2.1_l"], sam_dir / "sam2.1_l.pt")]
     elif args.sam_variant == "base-only":
-        sam_targets = [(SAM_URLS["sam2_b"], sam_dir / "sam2_b.pt")]
+        sam_targets = [(SAM_URLS["sam2.1_b"], sam_dir / "sam2.1_b.pt")]
+    elif args.sam_variant == "tiny-only":
+        sam_targets = [(SAM_URLS["sam2.1_t"], sam_dir / "sam2.1_t.pt")]
     elif args.sam_variant == "all-ultralytics":
         sam_targets = [
-            (SAM_URLS["sam2_b"], sam_dir / "sam2_b.pt"),
-            (SAM_URLS["sam2_t"], sam_dir / "sam2_t.pt"),
+            (SAM_URLS["sam2.1_l"], sam_dir / "sam2.1_l.pt"),
             (SAM_URLS["sam2.1_b"], sam_dir / "sam2.1_b.pt"),
             (SAM_URLS["sam2.1_t"], sam_dir / "sam2.1_t.pt"),
         ]
@@ -215,11 +210,11 @@ def main() -> int:
     # In kế hoạch
     print("\n[KẾ HOẠCH TẢI]:")
     if sam_targets:
-        print("  1. SAM 2 Checkpoints:")
+        print("  1. SAM 2.1 Checkpoints:")
         for url, p in sam_targets:
             print(f"     - {p.name} từ {url}")
     else:
-        print("  1. SAM 2: Bỏ qua (skip).")
+        print("  1. SAM 2.1: Bỏ qua (skip).")
 
     if vlm_targets:
         print("  2. VLM Repositories:")
@@ -237,12 +232,13 @@ def main() -> int:
     env_file = ROOT / ".env"
     if env_file.is_file():
         from dotenv import load_dotenv
+
         load_dotenv(env_file, override=False)
         token = os.getenv("HF_TOKEN") or None
 
-    # Thực thi tải SAM 2
+    # Thực thi tải SAM 2.1
     if sam_targets:
-        print("\n===> BẮT ĐẦU TẢI SAM 2 CHECKPOINTS...")
+        print("\n===> BẮT ĐẦU TẢI SAM 2.1 CHECKPOINTS...")
         for url, dest in sam_targets:
             download_file_with_progress(url, dest)
 
@@ -253,11 +249,10 @@ def main() -> int:
             download_hf_repo(repo_id, dest, hf_token=token)
 
     print("\n" + "=" * 76)
-    print("HOÀN TẤT TẢI TẤT CẢ MÔ HÌNH YÊU CẦU CHO PIPELINE SAM 2 + VLM!")
+    print("HOÀN TẤT TẢI SAM 2.1 LARGE + QWEN3-VL-4B-INSTRUCT (BF16)!")
     print("=" * 76)
     return 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
-

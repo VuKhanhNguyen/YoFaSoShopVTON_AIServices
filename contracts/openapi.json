@@ -32,7 +32,7 @@
           "Health"
         ],
         "summary": "Ready",
-        "description": "Queue storage + heartbeat + file checkpoint; chưa thay inference nghiệm thu.",
+        "description": "Queue storage + heartbeat + vision weights + VTON API key (không cần OOTDiffusion).",
         "operationId": "ready_health_ready_get",
         "responses": {
           "200": {
@@ -312,7 +312,7 @@
           "System"
         ],
         "summary": "Models",
-        "description": "Kiểm tra file local, không tải model và không tuyên bố inference thành công.",
+        "description": "Kiểm tra file local và trạng thái cấu hình Cloud VTON, không lộ khóa.",
         "operationId": "models_internal_v1_models_get",
         "responses": {
           "200": {

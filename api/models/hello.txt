@@ -1,1 +1,3 @@
-hello my name is Nguyen Vu Khanh
+Hello my name is Nguyen Vu Khanh
+This folder models/ has model is called Qwen3_VL-4B-Instruct when you run "python setup_up_models.py" in virtual environment. 
+Of course you must rent a cloud GPU (i recommend you to rent in vast.ai) with enough VRAM & Disk storage (at least 24GB VRAM & 40GB storage) to run this model and some weight files such as SAM2, DeepFashion2, YOLO26-pose.

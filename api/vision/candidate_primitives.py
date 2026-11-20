@@ -192,6 +192,9 @@ def garment_fit_score(candidate_mask, pose_context, expected_category, target_la
                 if is_shorts:
                     if norm_hem > 0.82:
                         penalty += 0.40  # Quần short nhưng bị dài quá gối sát mắt cá chân
+                elif target_label == 'skirt':
+                    if norm_hem < 0.20:
+                        penalty += 0.40  # Chân váy quá cụt bất thường
                 else:
                     if norm_hem < 0.68:
                         penalty += 0.50  # Quần dài nhưng bị cụt thành quần short!
@@ -268,8 +271,8 @@ def evaluate_dress_proportions_and_color(candidate_image, candidate_mask, pose_c
     dress_width = float(xs.max() - xs.min())
     width_ratio = dress_width / hip_width
     fit_penalty = 0.0
-    if width_ratio > 1.45:
-        fit_penalty = min(1.0, (width_ratio - 1.45) / 0.6)
+    if width_ratio > 2.40:
+        fit_penalty = min(1.0, (width_ratio - 2.40) / 0.8)
     dress_fit_score = float(np.clip(1.0 - fit_penalty, 0.0, 1.0))
     color_score = garment_color_similarity(reference_image, reference_mask, candidate_image, candidate_mask)
     return (dress_fit_score, color_score)
@@ -408,6 +411,11 @@ def harmonize_sleeveless_arm_skin(generated_image, source_image, candidate_mask,
     shifted[:, :, 2] = np.clip(gen_lab[:, :, 2] + weight * db, 0.0, 255.0)
     return Image.fromarray(cv2.cvtColor(np.rint(shifted).astype(np.uint8), cv2.COLOR_LAB2RGB)), exposed_arm
 DRESS_STYLE_FAMILY = {'vest_dress': 'sleeveless_dress', 'sling_dress': 'sleeveless_dress', 'short_sleeved_dress': 'short_sleeved_dress', 'long_sleeved_dress': 'long_sleeved_dress'}
+UPPER_STYLE_FAMILY = {
+    'short_sleeved_shirt': 'short_upper', 'short_sleeved_outwear': 'short_upper',
+    'long_sleeved_shirt': 'long_upper', 'long_sleeved_outwear': 'long_upper',
+    'vest': 'sleeveless_upper', 'sling': 'sleeveless_upper',
+}
 
 def candidate_match_quality(candidate_label, target_label, expected_category):
     """Trả mức khớp subtype; confidence chỉ được dùng khi hai candidate cùng mức."""
@@ -427,6 +435,11 @@ def candidate_match_quality(candidate_label, target_label, expected_category):
         if candidate_label in {'shorts', 'trousers', 'skirt'}:
             return (2, f"cùng nhóm lower-body ({candidate_label} thay vì {target_label})")
         return (1, f"đúng lower-body nhưng detector nhận '{candidate_label}' thay vì '{target_label}'")
+    if expected_category == 'upper_body':
+        candidate_family = UPPER_STYLE_FAMILY.get(candidate_label)
+        target_family = UPPER_STYLE_FAMILY.get(target_label)
+        if candidate_family and candidate_family == target_family:
+            return (2, f'cùng nhóm kiểu tay áo ({target_family})')
     return (1, 'đúng upper-body nhưng khác subtype')
 
 
@@ -476,14 +489,16 @@ def lower_body_length_fidelity(candidate_mask, pose_context, target_subtype, cat
         return 1.0
     leg_span = max(10.0, ankle_y - hip_y)
     norm_hem = (cand_hem_y - hip_y) / leg_span
-    is_shorts = (target_subtype == "shorts") or (catalog_length in ("SHORT", "NGAN_TREN_GOI")) or ("short" in (target_subtype or "").lower())
+    is_shorts = (target_subtype == "shorts") or (catalog_length in ("SHORT", "NGAN_TREN_GOI", "TREN_GOI")) or ("short" in (target_subtype or "").lower())
     if is_shorts:
         if norm_hem > 0.82:
             return 0.2
         return 1.0
-    else:
-        # Quần dài (trousers, jeans, kaki, jogger, DAI_CHAM_GOT): gấu quần phải tới gần mắt cá chân
-        if norm_hem < 0.68:
-            return 0.0
-        return float(np.clip((norm_hem - 0.65) / 0.25, 0.2, 1.0))
+    if target_subtype == "skirt":
+        # Chân váy có thể ngắn/midi/dài theo thiết kế, chỉ phạt nếu gần như không che qua hông
+        return 1.0 if norm_hem >= 0.25 else 0.3
+    # Quần dài (trousers, jeans, kaki, jogger, DAI_CHAM_GOT): gấu quần phải tới gần mắt cá chân
+    if norm_hem < 0.68:
+        return 0.0
+    return float(np.clip((norm_hem - 0.65) / 0.25, 0.2, 1.0))
 
